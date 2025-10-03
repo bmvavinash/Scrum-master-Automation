@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:7.0
+    container_name: scrum_automation_mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_DATABASE: scrum_automation
+    volumes:
+      - mongodb_data:/data/db
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    networks:
+      - scrum_automation_network
+
+  # Scrum Automation Backend
+  backend:
+    build: .
+    container_name: scrum_automation_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGODB_URL=mongodb://admin:password@mongodb:27017/scrum_automation?authSource=admin
+      - MONGODB_DATABASE=scrum_automation
+      - ENVIRONMENT=production
+      - DEBUG=False
+    env_file:
+      - .env
+    depends_on:
+      - mongodb
+    networks:
+      - scrum_automation_network
+    volumes:
+      - ./logs:/app/logs
+
+  # Nginx Reverse Proxy (Optional)
+  nginx:
+    image: nginx:alpine
+    container_name: scrum_automation_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - backend
+    networks:
+      - scrum_automation_network
+
+volumes:
+  mongodb_data:
+
+networks:
+  scrum_automation_network:
+    driver: bridge

@@ -1,0 +1,55 @@
+import { api } from './http'
+
+// Velocity
+export const VelocityAPI = {
+  getDashboard: (teamId?: string, days: number = 30) =>
+    api.get('/velocity/dashboard', { params: { team_id: teamId, days } }).then(r => r.data),
+  getInsights: (teamId?: string, sprintId?: string, limit: number = 20) =>
+    api.get('/velocity/insights', { params: { team_id: teamId, sprint_id: sprintId, limit } }).then(r => r.data),
+}
+
+// Meetings
+export const MeetingsAPI = {
+  list: (params?: { meeting_type?: string; status?: string; limit?: number }) =>
+    api.get('/meetings/', { params }).then(r => r.data),
+  create: (meeting: any) => api.post('/meetings/', meeting).then(r => r.data),
+  get: (id: string) => api.get(`/meetings/${id}`).then(r => r.data),
+  addUpdate: (id: string, update: any) => api.post(`/meetings/${id}/updates`, update).then(r => r.data),
+  summarize: (id: string) => api.post(`/meetings/${id}/summarize`, null).then(r => r.data),
+  actionItems: (id: string) => api.get(`/meetings/${id}/action-items`).then(r => r.data),
+}
+
+// Jira
+export const JiraAPI = {
+  listTickets: (params?: { project_key?: string; assignee?: string; status?: string; limit?: number }) =>
+    api.get('/jira/tickets', { params }).then(r => r.data),
+  getTicket: (key: string) => api.get(`/jira/tickets/${key}`).then(r => r.data),
+  createTicket: (payload: { title: string; description?: string; assignee?: string; project_key?: string; labels?: string[]; story_points?: number }) =>
+    api.post('/jira/tickets', payload).then(r => r.data),
+  updateStatus: (key: string, new_status: string) => api.put(`/jira/tickets/${key}/status`, null, { params: { new_status } }).then(r => r.data),
+  addComment: (key: string, comment: string) => api.post(`/jira/tickets/${key}/comments`, null, { params: { comment } }).then(r => r.data),
+  createSubtask: (key: string, payload: { title: string; description?: string; assignee?: string }) =>
+    api.post(`/jira/tickets/${key}/subtasks`, payload).then(r => r.data),
+  projects: () => api.get('/jira/projects').then(r => r.data),
+}
+
+// Git
+export const GitAPI = {
+  dbCommits: (params?: { repository?: string; author?: string; limit?: number }) =>
+    api.get('/git/commits', { params }).then(r => r.data),
+  dbPullRequests: (params?: { repository?: string; author?: string; status?: string; limit?: number }) =>
+    api.get('/git/pull-requests', { params }).then(r => r.data),
+}
+
+// Chats / Bot
+export const ChatsAPI = {
+  help: () => api.get('/chats/bot/help').then(r => r.data),
+  messages: (params?: { channel_id?: string; thread_id?: string; limit?: number }) =>
+    api.get('/chats/messages', { params }).then(r => r.data),
+  sendMessage: (message: any) => api.post('/chats/messages', message).then(r => r.data),
+  processBot: (payload: { message: string; sender_id: string; sender_name: string; channel_id: string; thread_id?: string }) =>
+    api.post('/chats/bot/process', null, { params: payload }).then(r => r.data),
+}
+
+
+
