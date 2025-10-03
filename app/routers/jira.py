@@ -64,7 +64,7 @@ async def create_ticket(
 async def get_tickets(
     project_key: Optional[str] = None,
     assignee: Optional[str] = None,
-    status: Optional[TicketStatus] = None,
+    status: Optional[str] = None,
     limit: int = 50
     # db: AsyncIOMotorDatabase = Depends(get_database)  # Commented out - no DB
 ):
@@ -78,7 +78,7 @@ async def get_tickets(
         if assignee:
             jql_parts.append(f"assignee = {assignee}")
         if status:
-            jql_parts.append(f"status = '{status.value}'")
+            jql_parts.append(f"status = '{status}'")
         
         jql = " AND ".join(jql_parts) if jql_parts else "ORDER BY created DESC"
         

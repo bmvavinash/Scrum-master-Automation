@@ -1,3 +1,49 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Poppins:wght@500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  /* Brand green (configurable) as RGB to support Tailwind <alpha-value> */
+  --brand-50: 240 253 244;   /* emerald-50 */
+  --brand-100: 220 252 231;  /* emerald-100 */
+  --brand-200: 187 247 208;  /* emerald-200 */
+  --brand-300: 134 239 172;  /* emerald-300 */
+  --brand-400: 74 222 128;   /* emerald-400 */
+  --brand-500: 16 185 129;   /* emerald-500 */
+  --brand-600: 5 150 105;    /* emerald-600 */
+  --brand-700: 4 120 87;     /* emerald-700 */
+  --brand-800: 6 95 70;      /* emerald-800 */
+  --brand-900: 6 78 59;      /* emerald-900 */
+
+  --bg-page: 249 250 251;    /* gray-50 */
+  --bg-card: 255 255 255;    /* white */
+  --text-main: 17 24 39;     /* gray-900 */
+  --text-muted: 107 114 128; /* gray-500 */
+  --ring: var(--brand-500);
+}
+
+@layer base {
+  html { font-family: theme('fontFamily.sans'); }
+  body {
+    @apply bg-[rgb(var(--bg-page))] text-[rgb(var(--text-main))];
+  }
+  a { @apply text-brand-600 hover:text-brand-700; }
+  :focus { outline: none; }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-lg bg-brand-600 px-4 py-2 text-white hover:bg-brand-700 disabled:opacity-50 transition-colors;
+  }
+  .input {
+    @apply w-full rounded-lg border border-gray-300 px-4 py-2 focus:ring-2 focus:ring-brand-500 focus:border-transparent;
+  }
+  .card {
+    @apply bg-[rgb(var(--bg-card))] rounded-xl border border-gray-200 shadow-card;
+  }
+  .badge {
+    @apply px-2 py-1 text-xs rounded-full;
+  }
+}

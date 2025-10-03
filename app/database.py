@@ -29,8 +29,11 @@ async def connect_to_mongo():
         logger.info("Successfully connected to MongoDB")
         
     except Exception as e:
-        logger.error(f"Failed to connect to MongoDB: {e}")
-        raise
+        logger.warning(f"Failed to connect to MongoDB: {e}")
+        logger.warning("Running without database - some features may not work")
+        # Don't raise in development mode to allow testing without MongoDB
+        if settings.environment == "production":
+            raise
 
 
 async def close_mongo_connection():

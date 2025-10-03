@@ -24,8 +24,21 @@ export const JiraAPI = {
   listTickets: (params?: { project_key?: string; assignee?: string; status?: string; limit?: number }) =>
     api.get('/jira/tickets', { params }).then(r => r.data),
   getTicket: (key: string) => api.get(`/jira/tickets/${key}`).then(r => r.data),
-  createTicket: (payload: { title: string; description?: string; assignee?: string; project_key?: string; labels?: string[]; story_points?: number }) =>
-    api.post('/jira/tickets', payload).then(r => r.data),
+  // Backend expects query/body params, but implemented as function args in FastAPI signature.
+  // To be safe across CORS and body parsing, send via params.
+  createTicket: (payload: { title: string; description?: string; assignee?: string; project_key?: string; labels?: string[]; story_points?: number; priority?: string; ticket_type?: string }) =>
+    api.post('/jira/tickets', null, {
+      params: {
+        title: payload.title,
+        description: payload.description ?? '',
+        assignee: payload.assignee,
+        project_key: payload.project_key ?? 'SCRUM',
+        labels: payload.labels,
+        story_points: payload.story_points,
+        priority: payload.priority,
+        ticket_type: payload.ticket_type,
+      }
+    }).then(r => r.data),
   updateStatus: (key: string, new_status: string) => api.put(`/jira/tickets/${key}/status`, null, { params: { new_status } }).then(r => r.data),
   addComment: (key: string, comment: string) => api.post(`/jira/tickets/${key}/comments`, null, { params: { comment } }).then(r => r.data),
   createSubtask: (key: string, payload: { title: string; description?: string; assignee?: string }) =>
