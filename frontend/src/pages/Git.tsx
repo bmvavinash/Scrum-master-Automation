@@ -2,8 +2,8 @@ import { useQuery } from '@tanstack/react-query'
 import { GitAPI } from '../lib/api'
 
 export default function Git() {
-  const { data: commits, isLoading: loadingCommits } = useQuery({ queryKey: ['git','commits'], queryFn: () => GitAPI.dbCommits({ limit: 25 }) })
-  const { data: prs, isLoading: loadingPRs } = useQuery({ queryKey: ['git','prs'], queryFn: () => GitAPI.dbPullRequests({ limit: 25 }) })
+  const { data: commits = [], isLoading: loadingCommits } = useQuery({ queryKey: ['git','commits'], queryFn: () => GitAPI.dbCommits({ limit: 25 }) })
+  const { data: prs = [], isLoading: loadingPRs } = useQuery({ queryKey: ['git','prs'], queryFn: () => GitAPI.dbPullRequests({ limit: 25 }) })
 
   const getStatusColor = (status: string) => {
     switch (status?.toLowerCase()) {

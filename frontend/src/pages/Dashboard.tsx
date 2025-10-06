@@ -3,7 +3,7 @@ import { VelocityAPI } from '../lib/api'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend, BarChart, Bar } from 'recharts'
 
 export default function Dashboard() {
-  const { data: dashboard, isLoading } = useQuery({
+  const { data: dashboard = {}, isLoading } = useQuery({
     queryKey: ['velocity', 'dashboard'],
     queryFn: () => VelocityAPI.getDashboard(),
   })

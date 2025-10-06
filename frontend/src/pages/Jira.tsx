@@ -47,7 +47,7 @@ export default function Jira() {
     limit: appliedFilters.limit,
   }
 
-  const { data: tickets, isLoading } = useQuery({ queryKey: ['jira','tickets', ticketParams], queryFn: () => JiraAPI.listTickets(ticketParams) })
+  const { data: tickets = [], isLoading } = useQuery({ queryKey: ['jira','tickets', ticketParams], queryFn: () => JiraAPI.listTickets(ticketParams) })
   const [title, setTitle] = useState('New Task')
   const [description, setDescription] = useState('')
   const [projectKey, setProjectKey] = useState('SCRUM')
