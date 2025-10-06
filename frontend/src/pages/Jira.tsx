@@ -10,16 +10,20 @@ export default function Jira() {
   
   // Applied filters (used for API calls)
   const [appliedFilters, setAppliedFilters] = useState({
-    project_key: searchParams.get('project_key') || '',
+    project_key: searchParams.get('project_key') || 'SCRUM',
     assignee: searchParams.get('assignee') || '',
     status: searchParams.get('status') || '',
+    priority: searchParams.get('priority') || '',
+    view: (searchParams.get('view') as 'active' | 'backlog') || 'active',
     limit: Number(searchParams.get('limit') || 25)
   })
   
   // Form filters (temporary state before submit)
-  const [filterProject, setFilterProject] = useState<string>(appliedFilters.project_key)
+  const [filterProject, setFilterProject] = useState<string>(appliedFilters.project_key || 'SCRUM')
   const [filterAssignee, setFilterAssignee] = useState<string>(appliedFilters.assignee)
   const [filterStatus, setFilterStatus] = useState<string>(appliedFilters.status)
+  const [filterPriority, setFilterPriority] = useState<string>(appliedFilters.priority)
+  const [filterView, setFilterView] = useState<'active' | 'backlog'>(appliedFilters.view)
 
   // Apply filters function
   const applyFilters = () => {
@@ -27,6 +31,8 @@ export default function Jira() {
       project_key: filterProject,
       assignee: filterAssignee,
       status: filterStatus,
+      priority: filterPriority,
+      view: filterView,
       limit: appliedFilters.limit
     }
     setAppliedFilters(newFilters)
@@ -36,6 +42,8 @@ export default function Jira() {
     if (newFilters.project_key) params.project_key = newFilters.project_key
     if (newFilters.assignee) params.assignee = newFilters.assignee
     if (newFilters.status) params.status = newFilters.status
+    if (newFilters.priority) params.priority = newFilters.priority
+    if (newFilters.view && newFilters.view !== 'active') params.view = newFilters.view
     if (newFilters.limit && newFilters.limit !== 25) params.limit = String(newFilters.limit)
     setSearchParams(params, { replace: true })
   }
@@ -44,6 +52,8 @@ export default function Jira() {
     project_key: appliedFilters.project_key || undefined,
     assignee: appliedFilters.assignee || undefined,
     status: appliedFilters.status || undefined,
+    priority: appliedFilters.priority || undefined,
+    view: appliedFilters.view || 'active',
     limit: appliedFilters.limit,
   }
 
@@ -139,6 +149,14 @@ export default function Jira() {
           {/* Filters */}
           <div className="card p-4">
             <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+              <select
+                className="input max-w-[12rem]"
+                value={filterView}
+                onChange={(e) => setFilterView(e.target.value as 'active' | 'backlog')}
+              >
+                <option value="active">Active Sprint</option>
+                <option value="backlog">Backlog</option>
+              </select>
               <input
                 className="input max-w-[12rem]"
                 value={filterProject}
@@ -162,6 +180,18 @@ export default function Jira() {
                 <option>In Review</option>
                 <option>Done</option>
               </select>
+              <select
+                className="input max-w-[12rem]"
+                value={filterPriority}
+                onChange={(e) => setFilterPriority(e.target.value)}
+              >
+                <option value="">All Priorities</option>
+                <option>Highest</option>
+                <option>High</option>
+                <option>Medium</option>
+                <option>Low</option>
+                <option>Lowest</option>
+              </select>
               <button
                 className="btn-primary"
                 onClick={applyFilters}
@@ -174,10 +204,14 @@ export default function Jira() {
                   setFilterProject('')
                   setFilterAssignee('')
                   setFilterStatus('')
+                  setFilterPriority('')
+                  setFilterView('active')
                   setAppliedFilters({
                     project_key: '',
                     assignee: '',
                     status: '',
+                    priority: '',
+                    view: 'active',
                     limit: 25
                   })
                   setSearchParams({}, { replace: true })

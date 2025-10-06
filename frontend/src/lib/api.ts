@@ -27,7 +27,7 @@ export const MeetingsAPI = {
 
 // Jira
 export const JiraAPI = {
-  listTickets: (params?: { project_key?: string; assignee?: string; status?: string; limit?: number }) =>
+  listTickets: (params?: { project_key?: string; assignee?: string; status?: string; priority?: string; ticket_type?: string; reporter?: string; view?: 'active' | 'backlog'; limit?: number }) =>
     api.get('/jira/tickets', { params }).then(r => {
       const data = r.data as any
       if (Array.isArray(data)) return data

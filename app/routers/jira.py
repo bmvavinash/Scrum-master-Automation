@@ -65,24 +65,45 @@ async def get_tickets(
     project_key: Optional[str] = None,
     assignee: Optional[str] = None,
     status: Optional[str] = None,
+    priority: Optional[str] = None,
+    ticket_type: Optional[str] = None,
+    reporter: Optional[str] = None,
+    view: Optional[str] = 'active',
     limit: int = 50
-    # db: AsyncIOMotorDatabase = Depends(get_database)  # Commented out - no DB
+    # db: AsyncIOMotorDatabase = Depends(get_database)  # Commented out - no DB (reads)
 ):
     """Get Jira tickets with optional filters."""
     
     try:
-        # Build JQL query instead of database query
+        # Build JQL query (always fetch from Jira, never DB)
         jql_parts = []
         if project_key:
             jql_parts.append(f"project = {project_key}")
         if assignee:
             jql_parts.append(f"assignee = {assignee}")
+        if reporter:
+            jql_parts.append(f"reporter = {reporter}")
         if status:
             jql_parts.append(f"status = '{status}'")
+        if priority:
+            jql_parts.append(f"priority = '{priority}'")
+        if ticket_type:
+            jql_parts.append(f"type = '{ticket_type}'")
         
+        # Active vs Backlog view
+        normalized_view = (view or 'active').lower()
+        if normalized_view == 'active':
+            jql_parts.append("sprint IN openSprints()")
+        elif normalized_view == 'backlog':
+            # Show true backlog items only (not assigned to any sprint)
+            jql_parts.append("sprint IS EMPTY")
+
         jql = " AND ".join(jql_parts) if jql_parts else "ORDER BY created DESC"
         
         tickets = await jira_service.search_tickets(jql, limit)
+        # Diagnostic header via log to help verify live mode
+        if not jira_service.is_initialized():
+            logger.warning("Jira tickets requested but Jira client is not initialized - returning empty or mock upstream")
         return tickets
         
     except Exception as e:
