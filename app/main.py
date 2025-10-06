@@ -49,17 +49,27 @@ app = FastAPI(
 )
 
 # Add middleware
+allowed_origins = (
+    [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+    if settings.cors_origins and settings.cors_origins != "*"
+    else ["*"]
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if settings.debug else ["https://yourdomain.com"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+allowed_hosts = (
+    [h.strip() for h in settings.allowed_hosts.split(",") if h.strip()]
+    if settings.allowed_hosts and settings.allowed_hosts != "*"
+    else ["*"]
+)
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["*"] if settings.debug else ["yourdomain.com"]
+    allowed_hosts=allowed_hosts
 )
 
 

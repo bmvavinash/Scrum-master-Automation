@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # API Configuration
     api_v1_prefix: str = "/api/v1"
     
+    # Security / Networking
+    allowed_hosts: str = "*"  # Comma-separated, e.g. "example.com,ec2-52-21-62-175.compute-1.amazonaws.com,localhost"
+    cors_origins: str = "*"   # Comma-separated origins or "*"
+    
     class Config:
         env_file = ".env"
         case_sensitive = False
