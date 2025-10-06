@@ -280,6 +280,15 @@ async def handle_create_task_command(args: str, sender_id: str, sender_name: str
         )
         
         if ticket:
+            # Persist created ticket in DB
+            try:
+                from app.database import get_database
+                db = get_database()
+                ticket_dict = ticket.dict(by_alias=True, exclude={"id"})
+                result = await db.jira_tickets.insert_one(ticket_dict)
+                ticket.id = str(result.inserted_id)
+            except Exception:
+                pass
             return BotResponse(
                 message=f"✅ Created task: {ticket.jira_key} - {ticket.title}",
                 should_notify=True,
@@ -320,6 +329,15 @@ async def handle_create_blocker_command(args: str, sender_id: str, sender_name: 
         )
         
         if ticket:
+            # Persist created ticket in DB
+            try:
+                from app.database import get_database
+                db = get_database()
+                ticket_dict = ticket.dict(by_alias=True, exclude={"id"})
+                result = await db.jira_tickets.insert_one(ticket_dict)
+                ticket.id = str(result.inserted_id)
+            except Exception:
+                pass
             return BotResponse(
                 message=f"🚨 Created blocker: {ticket.jira_key} - {ticket.title}",
                 should_notify=True,
