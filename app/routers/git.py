@@ -1,8 +1,12 @@
 """Git integration endpoints."""
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
 from typing import List, Optional
 from app.models.git import GitCommit, PullRequest, GitWebhookEvent, GitEventType
+from app.models.jira import TicketStatus
+from app.config import get_settings
+import hmac
+import hashlib
 from app.services.git_service import GitService
 from app.database import get_database
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -180,18 +184,59 @@ async def merge_pull_request(
 
 @router.post("/webhook")
 async def handle_git_webhook(
-    webhook_data: dict,
-    event_type: str,
+    request: Request,
     background_tasks: BackgroundTasks
 ):
-    """Handle Git webhook events."""
-    
+    """Handle GitHub webhook events with HMAC verification and header-based event detection."""
     try:
+        settings = get_settings()
+        # Normalize secret to avoid trailing spaces/quotes issues from .env
+        secret = (settings.github_webhook_secret or "").strip().strip("'\"")
+
+        # Read raw body for signature verification
+        body_bytes = await request.body()
+        body_text = body_bytes.decode("utf-8")
+
+        # Verify signature if secret is configured
+        sig256 = request.headers.get("X-Hub-Signature-256", "")
+        sig1 = request.headers.get("X-Hub-Signature", "")
+        if secret:
+            # Compute both digests to support either header GitHub sends
+            expected256 = hmac.new(
+                key=secret.encode("utf-8"),
+                msg=body_bytes,
+                digestmod=hashlib.sha256,
+            ).hexdigest()
+            expected1 = hmac.new(
+                key=secret.encode("utf-8"),
+                msg=body_bytes,
+                digestmod=hashlib.sha1,
+            ).hexdigest()
+
+            match256 = hmac.compare_digest(sig256, f"sha256={expected256}") if sig256 else False
+            match1 = hmac.compare_digest(sig1, f"sha1={expected1}") if sig1 else False
+
+            if not (match256 or match1):
+                logger.warning(
+                    "GitHub webhook signature verification failed (present: sha256=%s sha1=%s)",
+                    bool(sig256), bool(sig1)
+                )
+                raise HTTPException(status_code=401, detail="Invalid signature")
+
+        # Detect event type from headers
+        event_type = request.headers.get("X-GitHub-Event", "")
+        if not event_type:
+            raise HTTPException(status_code=400, detail="Missing X-GitHub-Event header")
+
+        # Parse JSON payload
+        webhook_data = await request.json()
+
         # Process webhook in background
         background_tasks.add_task(process_git_webhook, event_type, webhook_data)
-        
         return {"message": "Webhook received"}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to process Git webhook: {e}")
         raise HTTPException(status_code=500, detail="Failed to process webhook")
@@ -271,12 +316,25 @@ async def process_git_webhook(event_type: str, webhook_data: dict):
             logger.warning(f"Failed to process webhook event: {event_type}")
             return
         
-        # Store webhook event in database
+        # Store webhook event in database and persist derived entities
         from app.database import get_database
         db = get_database()
         
         event_dict = webhook_event.dict(by_alias=True, exclude={"id"})
         await db.git_webhook_events.insert_one(event_dict)
+        
+        # Persist commit or PR for frontend lists
+        if webhook_event.commit:
+            commit_dict = webhook_event.commit.dict(by_alias=True, exclude={"id"})
+            await db.git_commits.insert_one(commit_dict)
+        if webhook_event.pull_request:
+            pr_dict = webhook_event.pull_request.dict(by_alias=True, exclude={"id"})
+            # Upsert by repository + number
+            await db.pull_requests.update_one(
+                {"repository": pr_dict.get("repository"), "number": pr_dict.get("number")},
+                {"$set": pr_dict},
+                upsert=True
+            )
         
         # Handle different event types
         if event_type == "push":
@@ -334,10 +392,11 @@ async def handle_pull_request_event(webhook_event: GitWebhookEvent):
             jira_service = JiraService()
             
             for ticket_key in pr.jira_tickets:
+                # Map PR state/actions to Jira workflow
                 if pr.status.value == "open":
-                    await jira_service.update_ticket_status(ticket_key, "In Review")
+                    await jira_service.update_ticket_status(ticket_key, TicketStatus.IN_REVIEW)
                 elif pr.status.value == "merged":
-                    await jira_service.update_ticket_status(ticket_key, "Done")
+                    await jira_service.update_ticket_status(ticket_key, TicketStatus.DONE)
         
         # Send notification to Teams
         action_text = {
@@ -361,6 +420,20 @@ async def handle_pull_request_review_event(webhook_event: GitWebhookEvent):
     """Handle pull request review webhook event."""
     
     try:
+        # Optional: advance Jira to Ready for Build on approval if tickets referenced
+        try:
+            from app.services.jira_service import JiraService
+            from app.models.jira import TicketStatus as _TS
+            jira_service = JiraService()
+            payload = webhook_event.payload or {}
+            review_state = (payload.get("review") or {}).get("state", "").lower()
+            pr = webhook_event.pull_request
+            if pr and pr.jira_tickets and review_state == "approved":
+                for ticket_key in pr.jira_tickets:
+                    await jira_service.update_ticket_status(ticket_key, _TS.READY_FOR_BUILD)
+        except Exception as e:
+            logger.warning(f"Failed Jira transition on PR review: {e}")
+
         # Send notification to Teams
         await send_teams_notification(
             "Pull Request Review",

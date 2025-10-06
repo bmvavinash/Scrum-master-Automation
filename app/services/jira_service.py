@@ -3,6 +3,7 @@
 import logging
 from typing import List, Dict, Any, Optional
 from jira import JIRA
+import requests
 from app.config import get_settings
 from app.models.jira import JiraTicket, JiraProject, TicketType, TicketPriority, TicketStatus
 
@@ -16,6 +17,10 @@ class JiraService:
         self.settings = get_settings()
         self.jira_client = None
         self._initialize_jira()
+
+    def is_initialized(self) -> bool:
+        """Return True if Jira client is initialized with credentials."""
+        return self.jira_client is not None
     
     def _initialize_jira(self):
         """Initialize Jira client."""
@@ -24,8 +29,13 @@ class JiraService:
                 logger.warning("Jira credentials not configured")
                 return
             
+            # Force Jira Cloud REST API v3 usage
+            options = {
+                'server': self.settings.jira_url,
+                'rest_api_version': '3'
+            }
             self.jira_client = JIRA(
-                server=self.settings.jira_url,
+                options=options,
                 basic_auth=(self.settings.jira_email, self.settings.jira_api_token)
             )
             logger.info("Jira client initialized successfully")
@@ -135,17 +145,20 @@ class JiraService:
         """Search tickets using JQL."""
         
         if not self.jira_client:
-            logger.warning("Jira client not initialized - returning mock data")
-            # Return mock data for development/testing
-            return self._get_mock_tickets()
+            logger.warning("Jira client not initialized - returning empty list")
+            return []
         
         try:
             issues = self.jira_client.search_issues(jql, maxResults=max_results)
             return [self._convert_issue_to_ticket(issue) for issue in issues]
         except Exception as e:
             logger.error(f"Failed to search tickets: {e}")
-            # Return mock data as fallback
-            return self._get_mock_tickets()
+            # Fallback to direct Jira Cloud v3 /search/jql
+            try:
+                return self._search_tickets_v3_jql(jql, max_results)
+            except Exception as e2:
+                logger.error(f"Fallback v3 /search/jql failed: {e2}")
+                return []
     
     def _get_mock_tickets(self) -> List[JiraTicket]:
         """Return mock tickets for development/testing."""
@@ -310,3 +323,90 @@ class JiraService:
             issue_types=[],
             versions=[]
         )
+
+    def _convert_issue_json_to_ticket(self, issue: Dict[str, Any]) -> JiraTicket:
+        """Convert Jira v3 REST issue JSON to JiraTicket model."""
+        fields = issue.get('fields', {})
+        
+        def _adf_to_plain_text(adf: Any) -> Optional[str]:
+            """Convert Atlassian Document Format (ADF) to plain text."""
+            if adf is None:
+                return None
+            if isinstance(adf, str):
+                return adf
+            # Expected ADF dict structure with 'content' arrays and 'text' leafs
+            parts: list[str] = []
+            def walk(node: Any):
+                if isinstance(node, dict):
+                    # Append text if present
+                    text = node.get('text')
+                    if isinstance(text, str):
+                        parts.append(text)
+                    # Recurse into content
+                    content = node.get('content')
+                    if isinstance(content, list):
+                        for child in content:
+                            walk(child)
+                elif isinstance(node, list):
+                    for child in node:
+                        walk(child)
+            walk(adf)
+            return " ".join(p.strip() for p in parts if isinstance(p, str) and p.strip()) or None
+        
+        def _get(d, path, default=None):
+            cur = d
+            for p in path:
+                if cur is None:
+                    return default
+                if isinstance(cur, dict):
+                    cur = cur.get(p)
+                else:
+                    cur = getattr(cur, p, None)
+            return cur if cur is not None else default
+        
+        description_raw = _get(fields, ['description'])
+        description_text = _adf_to_plain_text(description_raw)
+        return JiraTicket(
+            jira_key=issue.get('key', ''),
+            jira_id=str(issue.get('id', '')),
+            title=_get(fields, ['summary'], ''),
+            description=description_text or '',
+            ticket_type=_get(fields, ['issuetype', 'name'], 'Task'),
+            status=_get(fields, ['status', 'name'], 'To Do'),
+            priority=_get(fields, ['priority', 'name'], 'Medium'),
+            assignee=_get(fields, ['assignee', 'displayName']),
+            reporter=_get(fields, ['reporter', 'displayName'], ''),
+            project_key=_get(fields, ['project', 'key'], ''),
+            labels=fields.get('labels', []) or [],
+            components=[],
+            fix_versions=[],
+            created_at=_get(fields, ['created']),
+            updated_at=_get(fields, ['updated']),
+            due_date=_get(fields, ['duedate']),
+            story_points=fields.get('customfield_10016'),
+            epic_link=fields.get('customfield_10014'),
+            parent_key=_get(fields, ['parent', 'key'])
+        )
+
+    def _search_tickets_v3_jql(self, jql: str, max_results: int) -> List[JiraTicket]:
+        """Direct call to Jira Cloud v3 search/jql endpoint (POST)."""
+        if not all([self.settings.jira_url, self.settings.jira_email, self.settings.jira_api_token]):
+            logger.warning("Jira credentials missing for direct v3 call")
+            return []
+        url = self.settings.jira_url.rstrip('/') + '/rest/api/3/search/jql'
+        payload = {
+            'jql': jql,
+            'maxResults': max_results,
+            'fields': [
+                'summary','description','issuetype','status','priority','assignee','reporter',
+                'project','labels','created','updated','duedate','parent','customfield_10016','customfield_10014'
+            ]
+        }
+        auth = (self.settings.jira_email, self.settings.jira_api_token)
+        headers = {'Accept': 'application/json','Content-Type': 'application/json'}
+        resp = requests.post(url, json=payload, auth=auth, headers=headers, timeout=30)
+        if not resp.ok:
+            raise RuntimeError(f"Jira v3 search failed: {resp.status_code} {resp.text}")
+        data = resp.json() or {}
+        issues = data.get('issues', []) or []
+        return [self._convert_issue_json_to_ticket(issue) for issue in issues]

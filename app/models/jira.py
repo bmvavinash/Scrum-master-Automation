@@ -20,6 +20,7 @@ class TicketStatus(str, Enum):
     TO_DO = "To Do"
     IN_PROGRESS = "In Progress"
     IN_REVIEW = "In Review"
+    READY_FOR_BUILD = "Ready for Build"
     DONE = "Done"
     CANCELLED = "Cancelled"
 
