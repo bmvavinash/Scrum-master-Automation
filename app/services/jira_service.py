@@ -16,6 +16,7 @@ class JiraService:
     def __init__(self):
         self.settings = get_settings()
         self.jira_client = None
+        self.jira_url = self.settings.jira_url
         self._initialize_jira()
 
     def is_initialized(self) -> bool:
@@ -43,6 +44,31 @@ class JiraService:
             logger.error(f"Failed to initialize Jira client: {e}")
             self.jira_client = None
     
+    def _text_to_adf(self, text: str) -> Dict[str, Any]:
+        """Convert plain text to Atlassian Document Format (ADF)."""
+        if not text:
+            return {
+                "type": "doc",
+                "version": 1,
+                "content": []
+            }
+        
+        return {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": text
+                        }
+                    ]
+                }
+            ]
+        }
+
     async def create_ticket(
         self,
         title: str,
@@ -64,7 +90,7 @@ class JiraService:
             issue_dict = {
                 'project': {'key': project_key},
                 'summary': title,
-                'description': description,
+                'description': self._text_to_adf(description),
                 'issuetype': {'name': ticket_type.value},
                 'priority': {'name': priority.value},
             }
@@ -241,10 +267,36 @@ class JiraService:
             return False
         
         try:
-            issue = self.jira_client.issue(ticket_key)
-            self.jira_client.add_comment(issue, comment)
-            logger.info(f"Added comment to ticket {ticket_key}")
-            return True
+            # Use the REST API v3 format for comments
+            comment_data = {
+                "body": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": comment
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+            
+            # Use the REST API directly for v3 compatibility
+            url = f"{self.jira_url}/rest/api/3/issue/{ticket_key}/comment"
+            response = self.jira_client._session.post(url, json=comment_data)
+            
+            if response.status_code in [200, 201]:
+                logger.info(f"Added comment to ticket {ticket_key}")
+                return True
+            else:
+                logger.error(f"Failed to add comment to ticket {ticket_key}: {response.status_code} - {response.text}")
+                return False
+                
         except Exception as e:
             logger.error(f"Failed to add comment to ticket {ticket_key}: {e}")
             return False
@@ -286,14 +338,44 @@ class JiraService:
             logger.error(f"Failed to create subtask: {e}")
             return None
     
+    def _adf_to_plain_text(self, adf: Any) -> Optional[str]:
+        """Convert Atlassian Document Format (ADF) to plain text."""
+        if adf is None:
+            return None
+        if isinstance(adf, str):
+            return adf
+        # Expected ADF dict structure with 'content' arrays and 'text' leafs
+        parts: list[str] = []
+        def walk(node: Any):
+            if isinstance(node, dict):
+                # Append text if present
+                text = node.get('text')
+                if isinstance(text, str):
+                    parts.append(text)
+                # Recurse into content
+                content = node.get('content')
+                if isinstance(content, list):
+                    for child in content:
+                        walk(child)
+            elif isinstance(node, list):
+                for child in node:
+                    walk(child)
+        walk(adf)
+        return " ".join(p.strip() for p in parts if isinstance(p, str) and p.strip()) or None
+
     def _convert_issue_to_ticket(self, issue) -> JiraTicket:
         """Convert Jira issue to JiraTicket model."""
+        
+        # Handle description field - convert ADF to plain text if needed
+        description = getattr(issue.fields, 'description', '')
+        if description and not isinstance(description, str):
+            description = self._adf_to_plain_text(description)
         
         return JiraTicket(
             jira_key=issue.key,
             jira_id=issue.id,
             title=issue.fields.summary,
-            description=getattr(issue.fields, 'description', ''),
+            description=description or '',
             ticket_type=TicketType(issue.fields.issuetype.name),
             status=TicketStatus(issue.fields.status.name),
             priority=TicketPriority(issue.fields.priority.name),

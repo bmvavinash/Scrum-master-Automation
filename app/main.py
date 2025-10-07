@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 from app.config import get_settings
 from app.database import connect_to_mongo, close_mongo_connection
-from app.routers import meetings, jira, git, velocity, code_intelligence, chats, teams_bot
+from app.routers import meetings, jira, git, velocity, code_intelligence, chats, teams_bot, git_hooks
 
 # Configure logging
 logging.basicConfig(
@@ -128,6 +128,7 @@ app.include_router(git.router, prefix=settings.api_v1_prefix)
 app.include_router(velocity.router, prefix=settings.api_v1_prefix)
 app.include_router(code_intelligence.router, prefix=settings.api_v1_prefix)
 app.include_router(chats.router, prefix=settings.api_v1_prefix)
+app.include_router(git_hooks.router, prefix=settings.api_v1_prefix)
 app.include_router(teams_bot.router)
 
 
@@ -150,6 +151,7 @@ async def get_api_status():
             "meetings": f"{settings.api_v1_prefix}/meetings",
             "jira": f"{settings.api_v1_prefix}/jira",
             "git": f"{settings.api_v1_prefix}/git",
+            "git_hooks": f"{settings.api_v1_prefix}/git-hooks",
             "velocity": f"{settings.api_v1_prefix}/velocity",
             "code_intelligence": f"{settings.api_v1_prefix}/code-intelligence",
             "chats": f"{settings.api_v1_prefix}/chats"

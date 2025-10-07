@@ -8,6 +8,7 @@ from app.config import get_settings
 import hmac
 import hashlib
 from app.services.git_service import GitService
+from app.services.git_hooks_service import GitHooksService
 from app.database import get_database
 from motor.motor_asyncio import AsyncIOMotorDatabase
 import logging
@@ -16,8 +17,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/git", tags=["git"])
 
-# Initialize service
+# Initialize services
 git_service = GitService()
+git_hooks_service = GitHooksService()
 
 
 @router.get("/repositories/{owner}/{repo}/commits", response_model=List[GitCommit])
@@ -354,17 +356,29 @@ async def handle_push_event(webhook_event: GitWebhookEvent):
     """Handle push webhook event."""
     
     try:
-        # Update Jira tickets if they're referenced in commits
-        if webhook_event.commit and webhook_event.commit.jira_tickets:
-            from app.services.jira_service import JiraService
-            jira_service = JiraService()
+        if webhook_event.commit:
+            # Use git hooks service to handle branch-based Jira updates
+            event_data = {
+                'branch_name': webhook_event.commit.branch,
+                'repository': webhook_event.repository,
+                'author': webhook_event.commit.author,
+                'commit_message': webhook_event.commit.message
+            }
             
-            for ticket_key in webhook_event.commit.jira_tickets:
-                # Update ticket status to "In Progress" or add comment
-                await jira_service.add_comment(
-                    ticket_key, 
-                    f"Code pushed to {webhook_event.commit.branch}: {webhook_event.commit.message}"
-                )
+            # Process the push event through git hooks
+            await git_hooks_service.process_git_event('push', event_data)
+            
+            # Also handle traditional Jira ticket references in commit messages
+            if webhook_event.commit.jira_tickets:
+                from app.services.jira_service import JiraService
+                jira_service = JiraService()
+                
+                for ticket_key in webhook_event.commit.jira_tickets:
+                    # Add comment about the commit
+                    await jira_service.add_comment(
+                        ticket_key, 
+                        f"Code pushed to {webhook_event.commit.branch}: {webhook_event.commit.message}"
+                    )
         
         # Send notification to Teams
         await send_teams_notification(
@@ -386,7 +400,30 @@ async def handle_pull_request_event(webhook_event: GitWebhookEvent):
         
         pr = webhook_event.pull_request
         
-        # Update Jira tickets if they're referenced
+        # Use git hooks service to handle branch-based Jira updates
+        event_data = {
+            'branch_name': pr.head_branch,
+            'repository': pr.repository,
+            'author': pr.author,
+            'pr_number': pr.number
+        }
+        
+        # Process the PR event through git hooks based on action
+        if webhook_event.action == "opened":
+            await git_hooks_service.process_git_event('pull_request_opened', event_data)
+        elif webhook_event.action == "closed":
+            # On close, treat as merged if any of these indicate merge
+            is_merged = (
+                (getattr(pr, "status", None) and pr.status.value == "merged")
+                or getattr(pr, "merged", False)
+                or (getattr(pr, "merged_at", None) is not None)
+            )
+            if is_merged:
+                await git_hooks_service.process_git_event('pull_request_merged', event_data)
+            else:
+                await git_hooks_service.process_git_event('pull_request_closed', event_data)
+        
+        # Also handle traditional Jira ticket references in PR title/description
         if pr.jira_tickets:
             from app.services.jira_service import JiraService
             jira_service = JiraService()
@@ -443,6 +480,58 @@ async def handle_pull_request_review_event(webhook_event: GitWebhookEvent):
         
     except Exception as e:
         logger.error(f"Failed to handle pull request review event: {e}")
+
+
+@router.post("/hooks/trigger")
+async def trigger_git_hook(
+    event_type: str,
+    branch_name: str,
+    repository: str,
+    author: str,
+    commit_message: str = "",
+    pr_number: int = 0
+):
+    """Manually trigger a git hook for testing purposes."""
+    
+    try:
+        event_data = {
+            'branch_name': branch_name,
+            'repository': repository,
+            'author': author,
+            'commit_message': commit_message,
+            'pr_number': pr_number
+        }
+        
+        success = await git_hooks_service.process_git_event(event_type, event_data)
+        
+        if success:
+            return {"message": f"Git hook {event_type} processed successfully for branch {branch_name}"}
+        else:
+            return {"message": f"Git hook {event_type} processed but no Jira ticket was updated"}
+        
+    except Exception as e:
+        logger.error(f"Failed to trigger git hook: {e}")
+        raise HTTPException(status_code=500, detail="Failed to trigger git hook")
+
+
+@router.get("/hooks/extract-ticket")
+async def extract_jira_ticket_from_branch(
+    branch_name: str,
+    project_key: str = "SCRUM"
+):
+    """Extract Jira ticket key from branch name for testing."""
+    
+    try:
+        ticket_key = git_hooks_service.extract_jira_ticket_from_branch(branch_name, project_key)
+        
+        if ticket_key:
+            return {"ticket_key": ticket_key, "branch_name": branch_name}
+        else:
+            return {"ticket_key": None, "branch_name": branch_name, "message": "No Jira ticket found in branch name"}
+        
+    except Exception as e:
+        logger.error(f"Failed to extract Jira ticket from branch: {e}")
+        raise HTTPException(status_code=500, detail="Failed to extract Jira ticket")
 
 
 async def send_teams_notification(title: str, message: str, url: str = None):
