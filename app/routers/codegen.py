@@ -9,6 +9,7 @@ import logging
 from app.database import get_database
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from app.services.llm_service import LLMService
+from app.services.jira_service import JiraService
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class TicketDescriptionOut(BaseModel):
 
 
 llm_service = LLMService()
+jira_service = JiraService()
 
 
 @router.post("/description", response_model=TicketDescriptionOut)
@@ -174,5 +176,92 @@ async def create_dummy_ticket_description(
     except Exception as e:
         logger.error(f"Failed to create dummy description: {e}")
         raise HTTPException(status_code=500, detail="Failed to create dummy description")
+
+
+class JiraCodegenRequest(BaseModel):
+    ticket_key: str = Field(..., description="Existing Jira ticket key, e.g., SCRUM-123")
+    context: Optional[Dict[str, Any]] = Field(default=None, description="Optional generation context")
+    post_mode: str = Field(default="comment", description="How to store code back: comment|none")
+
+
+def _build_adf_code_comment(title: str, generation: Dict[str, Any]) -> Dict[str, Any]:
+    """Create an Atlassian Document Format payload containing code blocks for each file."""
+    files = generation.get("code", []) or []
+    notes = generation.get("notes", []) or []
+
+    content = [
+        {"type": "paragraph", "content": [{"type": "text", "text": f"Code snippet: {title}"}]}
+    ]
+    for file in files:
+        path = file.get("path", "generated.txt")
+        code = file.get("content", "")
+        # Code block node
+        content.append({
+            "type": "paragraph",
+            "content": [{"type": "text", "text": f"File: {path}"}]
+        })
+        content.append({
+            "type": "codeBlock",
+            "attrs": {"language": generation.get("language", "text")},
+            "content": [{"type": "text", "text": code}]
+        })
+    if notes:
+        content.append({
+            "type": "paragraph",
+            "content": [{"type": "text", "text": "Notes:"}]
+        })
+        for n in notes:
+            content.append({
+                "type": "bulletList",
+                "content": [{
+                    "type": "listItem",
+                    "content": [{"type": "paragraph", "content": [{"type": "text", "text": str(n)}]}]
+                }]
+            })
+
+    return {"type": "doc", "version": 1, "content": content}
+
+
+@router.post("/jira/generate")
+async def generate_from_jira(
+    req: JiraCodegenRequest,
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    """Fetch real Jira description, generate code, and optionally post back to Jira as a code snippet comment."""
+    try:
+        ticket = await jira_service.get_ticket(req.ticket_key)
+        if not ticket:
+            raise HTTPException(status_code=404, detail="Jira ticket not found or Jira not configured")
+
+        description_text = ticket.description or ""
+        context = req.context or {}
+        generation = await llm_service.generate_code_from_description(description_text, context)
+
+        # Persist generation artifact
+        out_doc = {
+            "ticket_key": req.ticket_key,
+            "title": ticket.title,
+            "description": description_text,
+            "context": context,
+            "generation": generation,
+            "source": "jira",
+            "generated_at": datetime.utcnow(),
+        }
+        result = await db.codegen_artifacts.insert_one(out_doc)
+        out_doc["_id"] = str(result.inserted_id)
+
+        # Optionally post to Jira as ADF comment
+        posted = False
+        if req.post_mode == "comment":
+            adf = _build_adf_code_comment(ticket.title, generation)
+            posted = await jira_service.add_comment_adf(req.ticket_key, adf)
+            out_doc["jira_comment_posted"] = posted
+
+        return out_doc
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed Jira-based code generation: {e}")
+        raise HTTPException(status_code=500, detail="Failed Jira-based code generation")
 
 

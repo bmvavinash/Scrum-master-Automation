@@ -265,6 +265,30 @@ class JiraService:
         if not self.jira_client:
             logger.error("Jira client not initialized")
             return False
+
+    async def add_comment_adf(
+        self,
+        ticket_key: str,
+        adf_body: Dict[str, Any]
+    ) -> bool:
+        """Add a rich-text ADF comment to a ticket (supports code blocks)."""
+        if not self.jira_client:
+            logger.error("Jira client not initialized")
+            return False
+        try:
+            url = f"{self.jira_url}/rest/api/3/issue/{ticket_key}/comment"
+            comment_data = {"body": adf_body}
+            response = self.jira_client._session.post(url, json=comment_data)
+            if response.status_code in [200, 201]:
+                logger.info(f"Added ADF comment to ticket {ticket_key}")
+                return True
+            logger.error(
+                f"Failed to add ADF comment to ticket {ticket_key}: {response.status_code} - {response.text}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to add ADF comment to ticket {ticket_key}: {e}")
+            return False
         
         try:
             # Use the REST API v3 format for comments
