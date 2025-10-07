@@ -182,6 +182,8 @@ class JiraCodegenRequest(BaseModel):
     ticket_key: str = Field(..., description="Existing Jira ticket key, e.g., SCRUM-123")
     context: Optional[Dict[str, Any]] = Field(default=None, description="Optional generation context")
     post_mode: str = Field(default="comment", description="How to store code back: comment|none")
+    override_description: Optional[str] = Field(default=None, description="If provided, use this text instead of Jira description")
+    update_jira_description: bool = Field(default=False, description="If true and override provided, update Jira description before generation")
 
 
 def _build_adf_code_comment(title: str, generation: Dict[str, Any]) -> Dict[str, Any]:
@@ -233,7 +235,12 @@ async def generate_from_jira(
         if not ticket:
             raise HTTPException(status_code=404, detail="Jira ticket not found or Jira not configured")
 
-        description_text = ticket.description or ""
+        description_text = (req.override_description or "").strip() or (ticket.description or "")
+        if req.override_description and req.update_jira_description:
+            try:
+                await jira_service.update_ticket_description(req.ticket_key, req.override_description)
+            except Exception:
+                logger.warning("Failed to update Jira description prior to generation")
         context = req.context or {}
         generation = await llm_service.generate_code_from_description(description_text, context)
 

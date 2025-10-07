@@ -151,14 +151,26 @@ class JiraService:
     
     async def get_ticket(self, ticket_key: str) -> Optional[JiraTicket]:
         """Get ticket by key."""
-        
         if not self.jira_client:
             logger.error("Jira client not initialized")
             return None
-        
         try:
+            # First try via jira python client (may return ADF objects)
             issue = self.jira_client.issue(ticket_key)
-            return self._convert_issue_to_ticket(issue)
+            ticket = self._convert_issue_to_ticket(issue)
+            # If description missing/empty, fallback to direct v3 REST for robust ADF parsing
+            if ticket and (ticket.description is None or ticket.description.strip() == ""):
+                try:
+                    url = self.jira_url.rstrip('/') + f"/rest/api/3/issue/{ticket_key}?fields=summary,description,issuetype,status,priority,assignee,reporter,project,labels,created,updated,duedate,parent,customfield_10016,customfield_10014"
+                    auth = (self.settings.jira_email, self.settings.jira_api_token)
+                    headers = {'Accept': 'application/json'}
+                    resp = self.jira_client._session.get(url, headers=headers, auth=auth)
+                    if resp.ok:
+                        issue_json = resp.json()
+                        ticket = self._convert_issue_json_to_ticket(issue_json)
+                except Exception as e2:
+                    logger.warning(f"Fallback v3 read failed for {ticket_key}: {e2}")
+            return ticket
         except Exception as e:
             logger.error(f"Failed to get ticket {ticket_key}: {e}")
             return None
