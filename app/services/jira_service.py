@@ -289,6 +289,32 @@ class JiraService:
         except Exception as e:
             logger.error(f"Failed to add ADF comment to ticket {ticket_key}: {e}")
             return False
+
+    async def update_ticket_description(self, ticket_key: str, description: str) -> bool:
+        """Update Jira ticket description using ADF format (REST v3)."""
+        if not self.jira_client:
+            logger.error("Jira client not initialized")
+            return False
+        try:
+            url = f"{self.jira_url}/rest/api/3/issue/{ticket_key}"
+            payload = {
+                "update": {
+                    "description": [
+                        {"set": self._text_to_adf(description)}
+                    ]
+                }
+            }
+            response = self.jira_client._session.put(url, json=payload)
+            if response.status_code in [200, 204]:
+                logger.info(f"Updated description for {ticket_key}")
+                return True
+            logger.error(
+                f"Failed to update description for {ticket_key}: {response.status_code} - {response.text}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to update description for {ticket_key}: {e}")
+            return False
         
         try:
             # Use the REST API v3 format for comments
