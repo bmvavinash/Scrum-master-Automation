@@ -171,6 +171,62 @@ class LLMService:
                 "complexity_concerns": [],
                 "test_coverage_concerns": []
             }
+
+    async def generate_code_from_description(
+        self,
+        description: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Generate code artifacts from a Jira ticket description.
+
+        Returns a JSON structure with language, filename suggestions, code, tests, and notes.
+        """
+        context = context or {}
+
+        prompt = f"""
+        You are a senior software engineer. Given the Jira ticket description below, generate minimal, production-quality code that meets the requirement. Follow these rules strictly:
+
+        - Prefer clarity and maintainability over cleverness
+        - Include only necessary code; avoid placeholders and dead code
+        - Adhere to SOLID principles and reasonable error handling
+        - Provide unit tests when applicable
+        - Respect the target stack if provided in context
+
+        Ticket Description:
+        {description}
+
+        Context (optional):
+        {json.dumps(context) if context else '{}'}
+
+        Return a single JSON object with this exact structure:
+        {{
+          "language": "python|typescript|javascript|...",
+          "files": [
+            {{"path": "relative/suggested/path.ext", "purpose": "what this file does"}}
+          ],
+          "code": [
+            {{"path": "relative/suggested/path.ext", "content": "file content as string"}}
+          ],
+          "tests": [
+            {{"path": "relative/suggested/test_path.ext", "content": "test file content"}}
+          ],
+          "notes": ["any important implementation notes, assumptions, and next steps"]
+        }}
+        """
+
+        try:
+            response = await self._invoke_bedrock(prompt)
+            return json.loads(response)
+        except Exception as e:
+            logger.error(f"Failed to generate code from description: {e}")
+            # Fallback minimal structure
+            return {
+                "language": "python",
+                "files": [{"path": "app/example.py", "purpose": "Example based on description"}],
+                "code": [{"path": "app/example.py", "content": f"# Generated from description\n\nDESCRIPTION = {json.dumps(description)}\n"}],
+                "tests": [],
+                "notes": ["AI generation failed, returned fallback scaffold only"]
+            }
     
     async def _invoke_bedrock(self, prompt: str) -> str:
         """Invoke AWS Bedrock with the given prompt."""
