@@ -229,22 +229,51 @@ class LLMService:
             }
     
     async def _invoke_bedrock(self, prompt: str) -> str:
-        """Invoke AWS Bedrock with the given prompt."""
-        
-        body = {
-            "prompt": f"\n\nHuman: {prompt}\n\nAssistant:",
-            "max_tokens_to_sample": 4000,
-            "temperature": 0.1,
-            "top_p": 0.9,
-        }
-        
-        response = self.bedrock_client.invoke_model(
-            modelId=self.settings.bedrock_model_id,
-            body=json.dumps(body)
-        )
-        
-        response_body = json.loads(response['body'].read())
-        return response_body['completion']
+        """Invoke AWS Bedrock with Claude 3 via Messages API (converse)."""
+        try:
+            response = self.bedrock_client.converse(
+                modelId=self.settings.bedrock_model_id,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"text": prompt}
+                        ],
+                    }
+                ],
+                inferenceConfig={
+                    "temperature": 0.1,
+                    "topP": 0.9,
+                    "maxTokens": 4000,
+                },
+            )
+            # Extract first text block
+            outputs = response.get("output", {}).get("message", {}).get("content", [])
+            for block in outputs:
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    return text
+            # Fallback to raw string
+            return json.dumps(response)
+        except Exception as e:
+            logger.error(f"Bedrock converse failed: {e}")
+            # As a last resort, try legacy invoke_model if enabled models allow
+            try:
+                body = {
+                    "prompt": f"\n\nHuman: {prompt}\n\nAssistant:",
+                    "max_tokens_to_sample": 4000,
+                    "temperature": 0.1,
+                    "top_p": 0.9,
+                }
+                legacy = self.bedrock_client.invoke_model(
+                    modelId=self.settings.bedrock_model_id,
+                    body=json.dumps(body)
+                )
+                response_body = json.loads(legacy['body'].read())
+                return response_body.get('completion', '')
+            except Exception as e2:
+                logger.error(f"Bedrock legacy invoke_model also failed: {e2}")
+                raise
     
     def _build_meeting_summary_prompt(
         self, 
