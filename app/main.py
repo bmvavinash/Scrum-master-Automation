@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from app.config import get_settings
 from app.database import connect_to_mongo, close_mongo_connection
 from app.routers import meetings, jira, git, velocity, code_intelligence, chats, teams_bot, git_hooks
+from app.routers import codegen
 
 # Configure logging
 logging.basicConfig(
@@ -130,6 +131,7 @@ app.include_router(code_intelligence.router, prefix=settings.api_v1_prefix)
 app.include_router(chats.router, prefix=settings.api_v1_prefix)
 app.include_router(git_hooks.router, prefix=settings.api_v1_prefix)
 app.include_router(teams_bot.router)
+app.include_router(codegen.router, prefix=settings.api_v1_prefix)
 
 
 # Additional utility endpoints

@@ -151,14 +151,26 @@ class JiraService:
     
     async def get_ticket(self, ticket_key: str) -> Optional[JiraTicket]:
         """Get ticket by key."""
-        
         if not self.jira_client:
             logger.error("Jira client not initialized")
             return None
-        
         try:
+            # First try via jira python client (may return ADF objects)
             issue = self.jira_client.issue(ticket_key)
-            return self._convert_issue_to_ticket(issue)
+            ticket = self._convert_issue_to_ticket(issue)
+            # If description missing/empty, fallback to direct v3 REST for robust ADF parsing
+            if ticket and (ticket.description is None or ticket.description.strip() == ""):
+                try:
+                    url = self.jira_url.rstrip('/') + f"/rest/api/3/issue/{ticket_key}?fields=summary,description,issuetype,status,priority,assignee,reporter,project,labels,created,updated,duedate,parent,customfield_10016,customfield_10014"
+                    auth = (self.settings.jira_email, self.settings.jira_api_token)
+                    headers = {'Accept': 'application/json'}
+                    resp = self.jira_client._session.get(url, headers=headers, auth=auth)
+                    if resp.ok:
+                        issue_json = resp.json()
+                        ticket = self._convert_issue_json_to_ticket(issue_json)
+                except Exception as e2:
+                    logger.warning(f"Fallback v3 read failed for {ticket_key}: {e2}")
+            return ticket
         except Exception as e:
             logger.error(f"Failed to get ticket {ticket_key}: {e}")
             return None
@@ -264,6 +276,56 @@ class JiraService:
         
         if not self.jira_client:
             logger.error("Jira client not initialized")
+            return False
+
+    async def add_comment_adf(
+        self,
+        ticket_key: str,
+        adf_body: Dict[str, Any]
+    ) -> bool:
+        """Add a rich-text ADF comment to a ticket (supports code blocks)."""
+        if not self.jira_client:
+            logger.error("Jira client not initialized")
+            return False
+        try:
+            url = f"{self.jira_url}/rest/api/3/issue/{ticket_key}/comment"
+            comment_data = {"body": adf_body}
+            response = self.jira_client._session.post(url, json=comment_data)
+            if response.status_code in [200, 201]:
+                logger.info(f"Added ADF comment to ticket {ticket_key}")
+                return True
+            logger.error(
+                f"Failed to add ADF comment to ticket {ticket_key}: {response.status_code} - {response.text}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to add ADF comment to ticket {ticket_key}: {e}")
+            return False
+
+    async def update_ticket_description(self, ticket_key: str, description: str) -> bool:
+        """Update Jira ticket description using ADF format (REST v3)."""
+        if not self.jira_client:
+            logger.error("Jira client not initialized")
+            return False
+        try:
+            url = f"{self.jira_url}/rest/api/3/issue/{ticket_key}"
+            payload = {
+                "update": {
+                    "description": [
+                        {"set": self._text_to_adf(description)}
+                    ]
+                }
+            }
+            response = self.jira_client._session.put(url, json=payload)
+            if response.status_code in [200, 204]:
+                logger.info(f"Updated description for {ticket_key}")
+                return True
+            logger.error(
+                f"Failed to update description for {ticket_key}: {response.status_code} - {response.text}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to update description for {ticket_key}: {e}")
             return False
         
         try:
