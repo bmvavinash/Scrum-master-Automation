@@ -124,10 +124,10 @@ export default function Chat() {
       </div>
 
       {/* Quick Commands */}
-      <div className="bg-gray-50 rounded-xl p-4">
+        <div className="bg-gray-50 rounded-xl p-4">
         <h3 className="font-medium text-gray-900 mb-2">Quick Commands</h3>
         <div className="flex flex-wrap gap-2">
-          {['/help', '/create-task', '/get-velocity', '/get-status', '/create-blocker'].map((cmd) => (
+          {['/help', '/create-task', '/get-velocity', '/get-status', '/create-blocker', '/jira-desc SCRUM-34 New description from UI', '/codegen SCRUM-34 language=python framework=fastapi'].map((cmd) => (
             <button
               key={cmd}
               className="px-3 py-1 bg-white border border-gray-200 rounded-lg text-sm hover:bg-brand-50 hover:border-brand-200 hover:text-brand-700 transition-colors"

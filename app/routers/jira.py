@@ -182,6 +182,24 @@ async def add_ticket_comment(
         raise HTTPException(status_code=500, detail="Failed to add comment")
 
 
+@router.put("/tickets/{ticket_key}/description")
+async def update_ticket_description(
+    ticket_key: str,
+    description: str
+):
+    """Update a Jira ticket description (plain text → ADF)."""
+    try:
+        success = await jira_service.update_ticket_description(ticket_key, description)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to update ticket description")
+        return {"message": "Description updated"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update description: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update description")
+
+
 @router.post("/tickets/{ticket_key}/subtasks", response_model=JiraTicket)
 async def create_subtask(
     ticket_key: str,

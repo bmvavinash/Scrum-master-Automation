@@ -52,6 +52,7 @@ export const JiraAPI = {
     }).then(r => r.data).catch(() => null),
   updateStatus: (key: string, new_status: string) => api.put(`/jira/tickets/${key}/status`, null, { params: { new_status } }).then(r => r.data).catch(() => null),
   addComment: (key: string, comment: string) => api.post(`/jira/tickets/${key}/comments`, null, { params: { comment } }).then(r => r.data).catch(() => null),
+  updateDescription: (key: string, description: string) => api.put(`/jira/tickets/${key}/description`, null, { params: { description } }).then(r => r.data).catch(() => null),
   createSubtask: (key: string, payload: { title: string; description?: string; assignee?: string }) =>
     api.post(`/jira/tickets/${key}/subtasks`, payload).then(r => r.data).catch(() => null),
   projects: () => api.get('/jira/projects').then(r => {
@@ -89,6 +90,12 @@ export const ChatsAPI = {
   sendMessage: (message: any) => api.post('/chats/messages', message).then(r => r.data).catch(() => null),
   processBot: (payload: { message: string; sender_id: string; sender_name: string; channel_id: string; thread_id?: string }) =>
     api.post('/chats/bot/process', null, { params: payload }).then(r => r.data).catch(() => null),
+}
+
+// Codegen
+export const CodegenAPI = {
+  generateFromJira: (payload: { ticket_key: string; context?: Record<string, any>; post_mode?: 'comment' | 'none' }) =>
+    api.post('/codegen/jira/generate', payload).then(r => r.data).catch(() => null),
 }
 
 

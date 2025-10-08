@@ -254,6 +254,14 @@ async def process_command(
     
     elif command == '/insights':
         return await handle_get_insights_command(sender_id, sender_name, channel_id)
+
+    elif command == '/jira-desc':
+        # Usage: /jira-desc SCRUM-34 <new description text>
+        return await handle_update_jira_description_command(args, sender_id, sender_name, channel_id)
+
+    elif command == '/codegen':
+        # Usage: /codegen SCRUM-34 [language=python framework=fastapi]
+        return await handle_codegen_command(args, sender_id, sender_name, channel_id)
     
     else:
         return BotResponse(
@@ -498,6 +506,10 @@ def get_help_message() -> str:
 - `/analyze-code <commit_sha>` - Analyze code changes
 - `/get-metrics` - Get code quality metrics
 
+**Jira & Codegen:**
+- `/jira-desc <KEY> <text>` - Update Jira ticket description
+- `/codegen <KEY> [language=python framework=fastapi]` - Generate code from Jira description and post snippet
+
 **General:**
 - `/help` - Show this help message
 - `/insights` - Get AI-generated insights
@@ -532,6 +544,70 @@ async def execute_command(
             message=f"Command {command_type.value} not implemented yet.",
             should_notify=False
         )
+
+
+async def handle_update_jira_description_command(args: str, sender_id: str, sender_name: str, channel_id: str) -> BotResponse:
+    """Update Jira description via bot."""
+    parts = args.strip().split(' ', 1)
+    if len(parts) < 2:
+        return BotResponse(
+            message="Usage: /jira-desc <TICKET_KEY> <new description>",
+            should_notify=False
+        )
+    key, desc = parts[0], parts[1]
+    try:
+        success = await jira_service.update_ticket_description(key, desc)
+        if success:
+            return BotResponse(message=f"✅ Updated description for {key}")
+        return BotResponse(message=f"❌ Failed to update description for {key}", should_notify=True, notification_type="error")
+    except Exception as e:
+        logger.error(f"Failed to update description: {e}")
+        return BotResponse(message="❌ Error updating description", should_notify=True, notification_type="error")
+
+
+async def handle_codegen_command(args: str, sender_id: str, sender_name: str, channel_id: str) -> BotResponse:
+    """Trigger Jira-based code generation and post snippet."""
+    if not args.strip():
+        return BotResponse(
+            message="Usage: /codegen <TICKET_KEY> [language=python framework=fastapi]",
+            should_notify=False
+        )
+    parts = args.strip().split()
+    key = parts[0]
+    ctx: Dict[str, Any] = {}
+    for token in parts[1:]:
+        if '=' in token:
+            k, v = token.split('=', 1)
+            ctx[k] = v
+    try:
+        from app.database import get_database
+        db = get_database()
+        # Use existing codegen service via HTTP-like internal call: directly reuse LLM + Jira services
+        ticket = await jira_service.get_ticket(key)
+        if not ticket:
+            return BotResponse(message=f"❌ Ticket {key} not found", should_notify=True, notification_type="error")
+        description_text = ticket.description or ''
+        generation = await llm_service.generate_code_from_description(description_text, ctx)
+        # Persist
+        doc = {
+            "ticket_key": key,
+            "title": ticket.title,
+            "description": description_text,
+            "context": ctx,
+            "generation": generation,
+            "source": "jira",
+            "generated_at": __import__('datetime').datetime.utcnow(),
+        }
+        await db.codegen_artifacts.insert_one(doc)
+        # Post to Jira
+        from app.routers.codegen import _build_adf_code_comment
+        adf = _build_adf_code_comment(ticket.title, generation)
+        posted = await jira_service.add_comment_adf(key, adf)
+        msg = f"✅ Code generated for {key}. Posted to Jira: {'yes' if posted else 'no'}"
+        return BotResponse(message=msg, should_notify=True, notification_type="info")
+    except Exception as e:
+        logger.error(f"Failed to run codegen: {e}")
+        return BotResponse(message="❌ Error during code generation", should_notify=True, notification_type="error")
 
 
 async def store_bot_message(message: ChatMessage):
