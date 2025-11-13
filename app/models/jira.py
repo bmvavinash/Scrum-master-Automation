@@ -41,6 +41,7 @@ class JiraTicket(BaseModel):
     jira_id: str  # Internal Jira ID
     title: str
     description: Optional[str] = None
+    acceptance_criteria: Optional[str] = None  # Acceptance criteria (extracted from description or custom field)
     ticket_type: TicketType
     status: TicketStatus
     priority: TicketPriority = TicketPriority.MEDIUM

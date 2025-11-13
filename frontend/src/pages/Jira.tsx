@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { JiraAPI } from '../lib/api'
+import { JiraAPI, AgenticAPI } from '../lib/api'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import SectionHeader from '../components/SectionHeader'
@@ -73,6 +73,16 @@ export default function Jira() {
       setSelectedTicket(newTicket)
       setTitle('New Task')
       setDescription('')
+    },
+  })
+
+  const processAgentic = useMutation({
+    mutationFn: (ticketKey: string) => AgenticAPI.processAsync({ jira_key: ticketKey }),
+    onSuccess: () => {
+      alert('Agentic workflow queued successfully! Check the Agentic page for status.')
+    },
+    onError: (error: any) => {
+      alert(`Failed to queue workflow: ${error?.message || 'Unknown error'}`)
     },
   })
 
@@ -272,8 +282,15 @@ export default function Jira() {
               <div className="space-y-4">
                 <div>
                   <h5 className="font-medium text-gray-700 mb-2">Description</h5>
-                  <p className="text-gray-600">{selectedTicket.description || 'No description provided'}</p>
+                  <p className="text-gray-600 whitespace-pre-wrap">{selectedTicket.description || 'No description provided'}</p>
                 </div>
+
+                {selectedTicket.acceptance_criteria && (
+                  <div>
+                    <h5 className="font-medium text-gray-700 mb-2">Acceptance Criteria</h5>
+                    <p className="text-gray-600 whitespace-pre-wrap">{selectedTicket.acceptance_criteria}</p>
+                  </div>
+                )}
                 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
@@ -306,6 +323,21 @@ export default function Jira() {
                     </div>
                   </div>
                 )}
+
+                {/* Agentic Actions */}
+                <div className="pt-4 border-t">
+                  <h5 className="font-medium text-gray-700 mb-3">Agentic Code Generation</h5>
+                  <button
+                    className="btn-primary w-full"
+                    onClick={() => processAgentic.mutate(selectedTicket.jira_key)}
+                    disabled={processAgentic.isPending}
+                  >
+                    {processAgentic.isPending ? 'Queuing...' : '🚀 Generate Code Automatically'}
+                  </button>
+                  <p className="text-xs text-gray-500 mt-2">
+                    This will automatically generate code, create tests, validate, and push to Git branch.
+                  </p>
+                </div>
               </div>
             </div>
           ) : (

@@ -11,7 +11,8 @@ from contextlib import asynccontextmanager
 from app.config import get_settings
 from app.database import connect_to_mongo, close_mongo_connection
 from app.routers import meetings, jira, git, velocity, code_intelligence, chats, teams_bot, git_hooks
-from app.routers import codegen
+from app.routers import codegen, agentic
+from app.routers import jira_debug
 
 # Configure logging
 logging.basicConfig(
@@ -132,6 +133,9 @@ app.include_router(chats.router, prefix=settings.api_v1_prefix)
 app.include_router(git_hooks.router, prefix=settings.api_v1_prefix)
 app.include_router(teams_bot.router)
 app.include_router(codegen.router, prefix=settings.api_v1_prefix)
+app.include_router(agentic.router, prefix=settings.api_v1_prefix)
+if settings.debug:
+    app.include_router(jira_debug.router, prefix=settings.api_v1_prefix)
 
 
 # Additional utility endpoints
@@ -147,7 +151,10 @@ async def get_api_status():
             "teams_bot": bool(settings.teams_app_id and settings.teams_app_password),
             "git_integration": bool(settings.github_token),
             "llm_service": bool(settings.aws_access_key_id and settings.aws_secret_access_key),
-            "code_intelligence": True
+            "code_intelligence": True,
+            "agentic_code_generation": settings.agentic_enabled,
+            "cursor_api": bool(settings.cursor_api_key),
+            "amazon_q": bool(settings.amazon_q_app_id)
         },
         "endpoints": {
             "meetings": f"{settings.api_v1_prefix}/meetings",
@@ -156,7 +163,9 @@ async def get_api_status():
             "git_hooks": f"{settings.api_v1_prefix}/git-hooks",
             "velocity": f"{settings.api_v1_prefix}/velocity",
             "code_intelligence": f"{settings.api_v1_prefix}/code-intelligence",
-            "chats": f"{settings.api_v1_prefix}/chats"
+            "chats": f"{settings.api_v1_prefix}/chats",
+            "agentic": f"{settings.api_v1_prefix}/agentic",
+            "codegen": f"{settings.api_v1_prefix}/codegen"
         }
     }
 

@@ -98,5 +98,24 @@ export const CodegenAPI = {
     api.post('/codegen/jira/generate', payload).then(r => r.data).catch(() => null),
 }
 
+// Agentic Code Generation
+export const AgenticAPI = {
+  process: (payload: { jira_key: string; config?: Record<string, any> }) =>
+    api.post('/agentic/process', payload).then(r => r.data).catch(() => null),
+  processAsync: (payload: { jira_key: string; config?: Record<string, any> }) =>
+    api.post('/agentic/process/async', payload).then(r => r.data).catch(() => null),
+  getWorkflows: (params?: { jira_key?: string; status?: string; limit?: number }) =>
+    api.get('/agentic/workflows', { params }).then(r => {
+      const data = r.data as any
+      return data.workflows || []
+    }).catch(() => []),
+  getWorkflow: (workflowId: string) =>
+    api.get(`/agentic/workflows/${workflowId}`).then(r => r.data).catch(() => null),
+  getStatus: (jiraKey: string) =>
+    api.get(`/agentic/status/${jiraKey}`).then(r => r.data).catch(() => null),
+  getConfig: () =>
+    api.get('/agentic/config').then(r => r.data).catch(() => null),
+}
+
 
 

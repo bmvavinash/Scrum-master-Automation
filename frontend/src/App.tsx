@@ -4,6 +4,7 @@ import Meetings from './pages/Meetings'
 import Jira from './pages/Jira'
 import Git from './pages/Git'
 import Chat from './pages/Chat'
+import Agentic from './pages/Agentic'
 import './App.css'
 
 function App() {
@@ -17,6 +18,7 @@ function App() {
             <NavLink to="/meetings" className={({isActive})=> isActive ? 'text-brand-700 font-medium' : 'text-gray-600 hover:text-brand-700'}>Meetings</NavLink>
             <NavLink to="/jira" className={({isActive})=> isActive ? 'text-brand-700 font-medium' : 'text-gray-600 hover:text-brand-700'}>Jira</NavLink>
             <NavLink to="/git" className={({isActive})=> isActive ? 'text-brand-700 font-medium' : 'text-gray-600 hover:text-brand-700'}>Git</NavLink>
+            <NavLink to="/agentic" className={({isActive})=> isActive ? 'text-brand-700 font-medium' : 'text-gray-600 hover:text-brand-700'}>Agentic</NavLink>
             <NavLink to="/chat" className={({isActive})=> isActive ? 'text-brand-700 font-medium' : 'text-gray-600 hover:text-brand-700'}>Bot Chat</NavLink>
           </nav>
         </div>
@@ -27,6 +29,7 @@ function App() {
           <Route path="/meetings" element={<Meetings />} />
           <Route path="/jira" element={<Jira />} />
           <Route path="/git" element={<Git />} />
+          <Route path="/agentic" element={<Agentic />} />
           <Route path="/chat" element={<Chat />} />
         </Routes>
       </main>

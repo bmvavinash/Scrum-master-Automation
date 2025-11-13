@@ -1,9 +1,11 @@
-"""LLM service for AI-powered features using AWS Bedrock."""
+"""LLM service for AI-powered features using AWS Bedrock, Cursor API, and Amazon Q."""
 
 import boto3
 import json
 import logging
-from typing import List, Dict, Any, Optional
+import asyncio
+import httpx
+from typing import List, Dict, Any, Optional, Tuple
 from app.config import get_settings
 from app.models.meeting import MeetingSummary, ActionItem
 from app.models.velocity import PredictionInsight
@@ -17,21 +19,367 @@ class LLMService:
     def __init__(self):
         self.settings = get_settings()
         self.bedrock_client = None
+        self.bedrock_bearer_token = None
         self._initialize_bedrock()
     
     def _initialize_bedrock(self):
         """Initialize AWS Bedrock client."""
         try:
+            # Check for bearer token first (alternative authentication)
+            if self.settings.aws_bearer_token_bedrock:
+                logger.info("Using Bedrock bearer token authentication")
+                self.bedrock_bearer_token = self.settings.aws_bearer_token_bedrock
+                self.bedrock_client = None  # Will use direct HTTP calls with bearer token
+                logger.info("Bedrock bearer token configured")
+            elif self.settings.aws_access_key_id and self.settings.aws_secret_access_key:
             self.bedrock_client = boto3.client(
                 'bedrock-runtime',
                 aws_access_key_id=self.settings.aws_access_key_id,
                 aws_secret_access_key=self.settings.aws_secret_access_key,
                 region_name=self.settings.aws_region
             )
-            logger.info("Bedrock client initialized successfully")
+                self.bedrock_bearer_token = None
+                logger.info("Bedrock client initialized with AWS credentials")
+            else:
+                logger.warning("Bedrock credentials not configured (neither bearer token nor access key/secret)")
+                self.bedrock_client = None
+                self.bedrock_bearer_token = None
         except Exception as e:
             logger.error(f"Failed to initialize Bedrock client: {e}")
+            self.bedrock_client = None
+            self.bedrock_bearer_token = None
+    
+    async def generate_code_with_fallback(
+        self,
+        description: str,
+        context: Optional[Dict[str, Any]] = None,
+        existing_code: Optional[str] = None,
+        acceptance_criteria: Optional[str] = None
+    ) -> Tuple[Dict[str, Any], str]:
+        """Generate code with fallback mechanism across multiple LLM providers.
+        
+        Args:
+            description: Jira ticket description
+            context: Generation context (language, framework, etc.)
+            existing_code: Existing codebase context (optional)
+            acceptance_criteria: Acceptance criteria from Jira (optional)
+        
+        Returns:
+            Tuple of (generated_code_dict, provider_used)
+        """
+        providers = self._get_provider_priority()
+        last_error = None
+        
+        for provider in providers:
+            try:
+                logger.info(f"Attempting code generation with {provider}")
+                result = await self._generate_code_with_provider(
+                    provider=provider,
+                    description=description,
+                    context=context or {},
+                    existing_code=existing_code,
+                    acceptance_criteria=acceptance_criteria
+                )
+                if result:
+                    logger.info(f"Successfully generated code with {provider}")
+                    return result, provider
+            except Exception as e:
+                logger.warning(f"Failed to generate code with {provider}: {e}")
+                last_error = e
+                continue
+        
+        # All providers failed, use deterministic fallback
+        logger.error(f"All LLM providers failed. Last error: {last_error}")
+        logger.info("Using deterministic fallback")
+        fallback_result = self._deterministic_codegen(description, context or {})
+        return fallback_result, "fallback"
+    
+    def _get_provider_priority(self) -> List[str]:
+        """Get LLM provider priority list from config."""
+        priority_str = self.settings.llm_provider_priority or "bedrock,cursor,amazon_q"
+        providers = [p.strip() for p in priority_str.split(",")]
+        # Filter out providers that are not configured
+        available_providers = []
+        for provider in providers:
+            if provider == "bedrock" and (self.bedrock_client or self.bedrock_bearer_token):
+                available_providers.append(provider)
+            elif provider == "cursor" and self.settings.cursor_api_key:
+                available_providers.append(provider)
+            elif provider == "amazon_q" and self.settings.amazon_q_app_id:
+                available_providers.append(provider)
+        return available_providers if available_providers else ["bedrock"]  # Default to bedrock
+    
+    async def _generate_code_with_provider(
+        self,
+        provider: str,
+        description: str,
+        context: Dict[str, Any],
+        existing_code: Optional[str] = None,
+        acceptance_criteria: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Generate code using a specific provider.
+        
+        Args:
+            provider: Provider name (bedrock, cursor, amazon_q)
+            description: Jira ticket description
+            context: Generation context
+            existing_code: Existing codebase context
+            acceptance_criteria: Acceptance criteria
+        
+        Returns:
+            Generated code dict or None if failed
+        """
+        if provider == "bedrock":
+            return await self._generate_code_with_bedrock(
+                description, context, existing_code, acceptance_criteria
+            )
+        elif provider == "cursor":
+            return await self._generate_code_with_cursor(
+                description, context, existing_code, acceptance_criteria
+            )
+        elif provider == "amazon_q":
+            return await self._generate_code_with_amazon_q(
+                description, context, existing_code, acceptance_criteria
+            )
+        return None
+    
+    async def _generate_code_with_bedrock(
+        self,
+        description: str,
+        context: Dict[str, Any],
+        existing_code: Optional[str] = None,
+        acceptance_criteria: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Generate code using AWS Bedrock."""
+        if not self.bedrock_client and not self.bedrock_bearer_token:
+            raise Exception("Bedrock client not initialized (no credentials or bearer token)")
+        
+        prompt = self._build_code_generation_prompt(
+            description, context, existing_code, acceptance_criteria
+        )
+        
+        try:
+            response_text = await asyncio.wait_for(
+                self._invoke_bedrock(prompt),
+                timeout=self.settings.llm_timeout_seconds
+            )
+            return self._parse_code_generation_response(response_text, context)
+        except asyncio.TimeoutError:
+            logger.error("Bedrock request timed out")
             raise
+        except Exception as e:
+            logger.error(f"Bedrock code generation failed: {e}")
+            raise
+    
+    async def _generate_code_with_cursor(
+        self,
+        description: str,
+        context: Dict[str, Any],
+        existing_code: Optional[str] = None,
+        acceptance_criteria: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Generate code using Cursor API."""
+        if not self.settings.cursor_api_key:
+            raise Exception("Cursor API key not configured")
+        
+        prompt = self._build_code_generation_prompt(
+            description, context, existing_code, acceptance_criteria
+        )
+        
+        try:
+            async with httpx.AsyncClient(timeout=self.settings.llm_timeout_seconds) as client:
+                response = await client.post(
+                    f"{self.settings.cursor_api_url}/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.settings.cursor_api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": "gpt-4",
+                        "messages": [
+                            {"role": "system", "content": "You are a code generation assistant. Generate code based on the requirements."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 4000
+                    }
+                )
+                response.raise_for_status()
+                data = response.json()
+                response_text = data["choices"][0]["message"]["content"]
+                return self._parse_code_generation_response(response_text, context)
+        except Exception as e:
+            logger.error(f"Cursor API code generation failed: {e}")
+            raise
+    
+    async def _generate_code_with_amazon_q(
+        self,
+        description: str,
+        context: Dict[str, Any],
+        existing_code: Optional[str] = None,
+        acceptance_criteria: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Generate code using Amazon Q Developer."""
+        if not self.settings.amazon_q_app_id:
+            raise Exception("Amazon Q App ID not configured")
+        
+        # Amazon Q integration would go here
+        # For now, we'll use Bedrock as Amazon Q uses similar infrastructure
+        logger.warning("Amazon Q integration not yet implemented, falling back to Bedrock")
+        return await self._generate_code_with_bedrock(
+            description, context, existing_code, acceptance_criteria
+        )
+    
+    def _build_code_generation_prompt(
+        self,
+        description: str,
+        context: Dict[str, Any],
+        existing_code: Optional[str] = None,
+        acceptance_criteria: Optional[str] = None
+    ) -> str:
+        """Build code generation prompt for LLM."""
+        language = context.get("language", "python")
+        framework = context.get("framework", "fastapi")
+        follow_style = context.get("follow_style", True)
+        
+        prompt = f"""You are an expert software developer. Generate code based on the following requirements.
+
+JIRA TICKET DESCRIPTION:
+{description}
+
+"""
+        
+        if acceptance_criteria:
+            prompt += f"""ACCEPTANCE CRITERIA:
+{acceptance_criteria}
+
+"""
+        
+        prompt += f"""REQUIREMENTS:
+- Language: {language}
+- Framework: {framework}
+- Follow existing code style: {follow_style}
+
+"""
+        
+        if existing_code:
+            prompt += f"""EXISTING CODEBASE CONTEXT:
+{existing_code[:2000]}  # Truncated to avoid token limits
+
+Please generate code that follows the same patterns and style as the existing codebase.
+
+"""
+        
+        prompt += """Generate code that includes:
+1. All necessary files with proper structure
+2. Implementation code
+3. Unit tests based on acceptance criteria
+4. Proper error handling
+5. Documentation comments
+
+IMPORTANT: You MUST return ONLY a valid JSON object. Do not include any markdown code blocks, explanations, or text outside the JSON.
+
+Return your response as a JSON object with the following EXACT structure:
+{
+    "language": "python",
+    "files": [
+        {"path": "path/to/file.py", "purpose": "description"}
+    ],
+    "code": [
+        {"path": "path/to/file.py", "content": "complete file content here with proper indentation"}
+    ],
+    "tests": [
+        {"path": "tests/test_file.py", "content": "complete test file content here"}
+    ],
+    "notes": [
+        "Note 1",
+        "Note 2"
+    ]
+}
+
+CRITICAL REQUIREMENTS:
+1. Return ONLY the JSON object, no markdown, no code fences, no explanations
+2. The "code" array MUST contain at least one file with "path" and "content" fields
+3. Each file's "content" must be complete, valid code
+4. Use proper JSON escaping for strings (escape quotes, newlines, etc.)
+5. Do not include ```json or ``` markers
+
+Ensure the code is production-ready, follows best practices, and includes proper error handling."""
+        
+        return prompt
+    
+    def _parse_code_generation_response(
+        self,
+        response_text: str,
+        context: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Parse LLM response into code generation structure."""
+        try:
+            logger.debug(f"Parsing LLM response (length: {len(response_text)})")
+            logger.debug(f"Response preview: {response_text[:500]}")
+            
+            # Try to extract JSON from response
+            json_data = self._extract_json_block(response_text)
+            if json_data:
+                logger.debug(f"Successfully extracted JSON block")
+                # Validate structure
+                if self._validate_code_structure(json_data):
+                    return json_data
+                else:
+                    logger.warning(f"Extracted JSON has invalid structure: {list(json_data.keys())}")
+            
+            # Try to parse entire response as JSON
+            try:
+                json_data = json.loads(response_text)
+                if self._validate_code_structure(json_data):
+                    return json_data
+                else:
+                    logger.warning(f"Parsed JSON has invalid structure: {list(json_data.keys())}")
+            except json.JSONDecodeError as e:
+                logger.debug(f"Response is not valid JSON: {e}")
+            
+            # If JSON extraction fails, use deterministic fallback
+            logger.warning("Failed to parse LLM response as JSON, using fallback")
+            logger.debug(f"Full response: {response_text[:2000]}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Failed to parse code generation response: {e}", exc_info=True)
+            return None
+    
+    def _validate_code_structure(self, data: Dict[str, Any]) -> bool:
+        """Validate that parsed data has the required code structure."""
+        if not isinstance(data, dict):
+            logger.debug("Data is not a dict")
+            return False
+        
+        # Check for required "code" field
+        if "code" not in data:
+            logger.debug(f"Missing 'code' field. Available keys: {list(data.keys())}")
+            return False
+        
+        if not isinstance(data["code"], list):
+            logger.debug(f"'code' is not a list, it's: {type(data['code'])}")
+            return False
+        
+        if len(data["code"]) == 0:
+            logger.debug("'code' list is empty")
+            return False
+        
+        # Check that each code file has path and content
+        for i, code_file in enumerate(data["code"]):
+            if not isinstance(code_file, dict):
+                logger.debug(f"Code file {i} is not a dict: {type(code_file)}")
+                return False
+            if "path" not in code_file:
+                logger.debug(f"Code file {i} missing 'path' field. Keys: {list(code_file.keys())}")
+                return False
+            if "content" not in code_file:
+                logger.debug(f"Code file {i} missing 'content' field. Keys: {list(code_file.keys())}")
+                return False
+        
+        logger.debug(f"Code structure is valid with {len(data['code'])} files")
+        return True
     
     async def generate_meeting_summary(
         self, 
@@ -462,9 +810,15 @@ def test_get_item():
         }
     
     async def _invoke_bedrock(self, prompt: str) -> str:
-        """Invoke AWS Bedrock (Anthropic Claude 3) using Messages format via invoke_model.
+        """Invoke AWS Bedrock (Anthropic Claude 3) using Messages format.
 
-        This works with boto3 versions that don't expose the converse API.
+        Supports both boto3 client and bearer token authentication.
+        
+        Args:
+            prompt: The prompt to send to Bedrock
+        
+        Returns:
+            Response text from Bedrock
         """
         try:
             body = {
@@ -477,10 +831,25 @@ def test_get_item():
                         ]
                     }
                 ],
-                "max_tokens": 1200,
+                "max_tokens": 4096,
                 "temperature": 0.1,
                 "top_p": 0.9,
             }
+            
+            # Use bearer token if available, otherwise use boto3 client
+            if self.bedrock_bearer_token:
+                return await self._invoke_bedrock_with_bearer_token(body)
+            elif self.bedrock_client:
+                return await self._invoke_bedrock_with_boto3(body)
+            else:
+                raise Exception("No Bedrock authentication method available")
+            
+        except Exception as e:
+            logger.error(f"Bedrock invoke failed: {e}")
+            raise
+    
+    async def _invoke_bedrock_with_boto3(self, body: Dict[str, Any]) -> str:
+        """Invoke Bedrock using boto3 client."""
             response = self.bedrock_client.invoke_model(
                 modelId=self.settings.bedrock_model_id,
                 body=json.dumps(body),
@@ -504,8 +873,64 @@ def test_get_item():
                     return text
             # Fallback: 'completion'
             return response_body.get('completion', '') or json.dumps(response_body)
+    
+    async def _invoke_bedrock_with_bearer_token(self, body: Dict[str, Any]) -> str:
+        """Invoke Bedrock using bearer token authentication."""
+        region = self.settings.aws_region
+        # Convert model ID format: anthropic.claude-3-sonnet-20240229-v1:0 -> anthropic.claude-3-sonnet-20240229-v1:0
+        model_id = self.settings.bedrock_model_id
+        # Bedrock API endpoint format
+        url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{model_id.replace(':', '/')}/invoke"
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.bedrock_bearer_token}",
+            "Accept": "application/json"
+        }
+        
+        logger.debug(f"Invoking Bedrock with bearer token: {url}")
+        logger.debug(f"Model ID: {model_id}")
+        
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            try:
+                response = await client.post(
+                    url,
+                    json=body,
+                    headers=headers
+                )
+                
+                if response.status_code != 200:
+                    error_text = response.text[:500]
+                    logger.error(f"Bedrock API error: {response.status_code} - {error_text}")
+                    raise Exception(f"Bedrock API error: {response.status_code} - {error_text}")
+                
+                response_body = response.json()
+                
+                if not response_body:
+                    logger.error("Bedrock returned empty body")
+                    return ""
+                
+                # Claude messages response returns {'content':[{'type':'text','text':'...'}], ...}
+                contents = response_body.get('content') or []
+                for item in contents:
+                    text = item.get('text')
+                    if isinstance(text, str) and text.strip():
+                        logger.debug(f"Bedrock response received (length: {len(text)})")
+                        return text
+                
+                # Fallback: 'completion' or raw response
+                result = response_body.get('completion', '') or json.dumps(response_body)
+                if result:
+                    return result
+                
+                logger.error("Bedrock returned empty text")
+                return ""
+                
+            except httpx.TimeoutException:
+                logger.error("Bedrock request timed out")
+                raise Exception("Bedrock request timed out")
         except Exception as e:
-            logger.error(f"Bedrock messages invoke failed: {e}")
+                logger.error(f"Bedrock HTTP request failed: {e}")
             raise
     
     def _build_meeting_summary_prompt(

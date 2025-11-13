@@ -75,6 +75,18 @@ async def get_tickets(
     """Get Jira tickets with optional filters."""
     
     try:
+        # Verify project exists if project_key is provided
+        if project_key:
+            try:
+                projects = await jira_service.get_projects()
+                project_exists = any(p.key == project_key for p in projects)
+                if not project_exists:
+                    available_projects = [p.key for p in projects]
+                    logger.warning(f"Project '{project_key}' not found in accessible projects. Available projects: {available_projects}")
+                    # Don't fail, just log - maybe user wants to see if project exists
+            except Exception as e:
+                logger.debug(f"Could not verify project existence: {e}")
+        
         # Build JQL query (always fetch from Jira, never DB)
         jql_parts = []
         if project_key:
@@ -90,21 +102,78 @@ async def get_tickets(
         if ticket_type:
             jql_parts.append(f"type = '{ticket_type}'")
         
-        # Active vs Backlog view
+        # Active vs Backlog view - make it optional to avoid empty results
         normalized_view = (view or 'active').lower()
+        view_filter_added = False
         if normalized_view == 'active':
+            # Try to filter by active sprints, but this might return empty if no sprints exist
+            # We'll try with sprint filter first, then fallback if empty
             jql_parts.append("sprint IN openSprints()")
+            view_filter_added = True
         elif normalized_view == 'backlog':
             # Show true backlog items only (not assigned to any sprint)
             jql_parts.append("sprint IS EMPTY")
+            view_filter_added = True
 
-        jql = " AND ".join(jql_parts) if jql_parts else "ORDER BY created DESC"
+        # Build final JQL query
+        if jql_parts:
+            jql = " AND ".join(jql_parts)
+            # Add ORDER BY if not already present
+            if "ORDER BY" not in jql.upper():
+                jql += " ORDER BY created DESC"
+        else:
+            # Default query if no filters - get recent tickets
+            jql = "ORDER BY created DESC"
         
-        tickets = await jira_service.search_tickets(jql, limit)
-        # Diagnostic header via log to help verify live mode
-        if not jira_service.is_initialized():
-            logger.warning("Jira tickets requested but Jira client is not initialized - returning empty or mock upstream")
-        return tickets
+        logger.info(f"Executing JQL query: {jql}")
+        logger.debug(f"JQL parameters: project_key={project_key}, view={view}, limit={limit}")
+        
+        try:
+            tickets = await jira_service.search_tickets(jql, limit)
+            
+            # If no tickets found, try progressive fallbacks
+            if len(tickets) == 0:
+                # Fallback 1: Remove sprint filter if it was added
+                if view_filter_added and normalized_view == 'active':
+                    logger.info("No tickets found with sprint filter, trying without sprint filter")
+                    jql_parts_without_sprint = [p for p in jql_parts if "sprint" not in p.lower()]
+                    if jql_parts_without_sprint:
+                        jql_fallback = " AND ".join(jql_parts_without_sprint)
+                        if "ORDER BY" not in jql_fallback.upper():
+                            jql_fallback += " ORDER BY created DESC"
+                        logger.info(f"Trying fallback JQL query: {jql_fallback}")
+                        tickets = await jira_service.search_tickets(jql_fallback, limit)
+                        logger.info(f"Fallback query returned {len(tickets)} tickets")
+                
+                # Fallback 2: If still empty and project_key was specified, try without project filter
+                if len(tickets) == 0 and project_key:
+                    logger.info(f"No tickets found for project '{project_key}', trying query without project filter")
+                    jql_parts_no_project = [p for p in jql_parts if not p.startswith("project =")]
+                    if jql_parts_no_project:
+                        jql_fallback2 = " AND ".join(jql_parts_no_project)
+                        if "ORDER BY" not in jql_fallback2.upper():
+                            jql_fallback2 += " ORDER BY created DESC"
+                    else:
+                        jql_fallback2 = "ORDER BY created DESC"
+                    logger.info(f"Trying fallback JQL query (no project): {jql_fallback2}")
+                    tickets_fallback = await jira_service.search_tickets(jql_fallback2, limit)
+                    if len(tickets_fallback) > 0:
+                        logger.warning(f"Found {len(tickets_fallback)} tickets without project filter, but 0 with project '{project_key}'")
+                        logger.warning(f"This suggests project '{project_key}' either doesn't exist, has no tickets, or user doesn't have access")
+                    # Don't use fallback tickets - user requested specific project
+                    # tickets = tickets_fallback  # Uncomment if you want to show all tickets when project has none
+            
+            # Diagnostic logging
+            if not jira_service.is_initialized():
+                logger.warning("Jira tickets requested but Jira client is not initialized - returning empty or mock upstream")
+            
+            logger.info(f"Returning {len(tickets)} tickets for JQL: {jql}")
+            return tickets
+            
+        except Exception as e:
+            logger.error(f"Error in search_tickets: {e}", exc_info=True)
+            # Don't raise HTTPException here, let it be caught by outer try-except
+            raise
         
     except Exception as e:
         logger.error(f"Failed to get tickets: {e}")
@@ -247,6 +316,65 @@ async def get_projects():
     except Exception as e:
         logger.error(f"Failed to get projects: {e}")
         raise HTTPException(status_code=500, detail="Failed to get projects")
+
+
+@router.get("/test-connection")
+async def test_jira_connection():
+    """Test Jira connection and return diagnostic information."""
+    try:
+        diagnostics = {
+            "jira_configured": bool(jira_service.settings.jira_url and jira_service.settings.jira_email and jira_service.settings.jira_api_token),
+            "jira_initialized": jira_service.is_initialized(),
+            "jira_url": jira_service.settings.jira_url,
+            "jira_email": jira_service.settings.jira_email,
+            "projects": [],
+            "test_queries": {},
+            "error": None
+        }
+        
+        if diagnostics["jira_configured"]:
+            try:
+                # Get accessible projects
+                projects = await jira_service.get_projects()
+                diagnostics["projects"] = [
+                    {
+                        "key": p.key,
+                        "name": p.name,
+                        "id": p.id
+                    }
+                    for p in projects
+                ]
+                
+                # Test queries
+                test_queries = [
+                    ("All tickets", "ORDER BY created DESC"),
+                    ("Project SCRUM", "project = SCRUM ORDER BY created DESC"),
+                    ("Any project", "project IS NOT EMPTY ORDER BY created DESC"),
+                ]
+                
+                for query_name, test_jql in test_queries:
+                    try:
+                        test_results = await jira_service.search_tickets(test_jql, 5)
+                        diagnostics["test_queries"][query_name] = {
+                            "jql": test_jql,
+                            "count": len(test_results),
+                            "tickets": [t.jira_key for t in test_results[:5]]
+                        }
+                    except Exception as e:
+                        diagnostics["test_queries"][query_name] = {
+                            "jql": test_jql,
+                            "error": str(e)
+                        }
+                        
+            except Exception as e:
+                diagnostics["error"] = str(e)
+                logger.error(f"Test failed: {e}", exc_info=True)
+        
+        return diagnostics
+        
+    except Exception as e:
+        logger.error(f"Failed to test Jira connection: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to test connection: {str(e)}")
 
 
 @router.get("/search")
