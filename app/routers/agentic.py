@@ -307,3 +307,4 @@ async def get_ticket_status(
         raise HTTPException(status_code=500, detail="Failed to get ticket status")
 
 
+

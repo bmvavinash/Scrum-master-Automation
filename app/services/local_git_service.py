@@ -424,6 +424,21 @@ class LocalGitService:
                 full_path = os.path.join(repo.working_dir, file_path)
                 if os.path.exists(full_path):
                     try:
+                        # Check if file has changes compared to HEAD
+                        try:
+                            diff_output = repo.git.diff('HEAD', '--', file_path, exit_code=[0, 1])
+                            if not diff_output.strip():
+                                # File exists but no changes, check if it's in the commit
+                                try:
+                                    repo.git.show(f'HEAD:{file_path}', exit_code=[0, 1])
+                                    logger.debug(f"File {file_path} unchanged, skipping")
+                                    continue
+                                except Exception:
+                                    # File is new, needs to be added
+                                    pass
+                        except Exception:
+                            pass
+                        
                         repo.git.add(file_path)
                         logger.info(f"Added {file_path} to staging")
                         files_added = True
@@ -432,22 +447,75 @@ class LocalGitService:
                 else:
                     logger.warning(f"File {file_path} does not exist, skipping")
             
-            # Also add any untracked files
+            # Also add any untracked files in the directories we're working with
             untracked = repo.untracked_files
             if untracked:
-                for file_path in untracked:
-                    if file_path in file_paths or any(file_path.startswith(f) for f in file_paths):
-                        try:
-                            repo.git.add(file_path)
-                            logger.info(f"Added untracked file {file_path}")
-                            files_added = True
-                        except Exception as e:
-                            logger.warning(f"Failed to add untracked file {file_path}: {e}")
+                for untracked_path in untracked:
+                    # Check if this untracked file is in any of the directories we're committing
+                    for file_path in file_paths:
+                        dir_path = os.path.dirname(file_path) if os.path.dirname(file_path) else '.'
+                        if untracked_path.startswith(dir_path) or file_path == untracked_path:
+                            try:
+                                repo.git.add(untracked_path)
+                                logger.info(f"Added untracked file {untracked_path}")
+                                files_added = True
+                            except Exception as e:
+                                logger.warning(f"Failed to add untracked file {untracked_path}: {e}")
+                            break
             
-            # Check if there are changes to commit
-            if not repo.is_dirty() and not files_added:
-                logger.info("No changes to commit")
-                return True
+            # Check if there are changes to commit after adding files
+            try:
+                # Check staged changes (files added to index)
+                staged_changes = repo.index.diff("HEAD")
+                # Check if index has any changes
+                if not staged_changes and not files_added:
+                    # Check if any of the files are actually different from HEAD
+                    has_changes = False
+                    for file_path in file_paths:
+                        full_path = os.path.join(repo.working_dir, file_path)
+                        if os.path.exists(full_path):
+                            try:
+                                # Check if file is tracked
+                                tracked = repo.git.ls_files(file_path, exit_code=[0, 1])
+                                if tracked.strip():
+                                    # File is tracked, check if it differs from HEAD
+                                    diff = repo.git.diff('HEAD', '--', file_path, exit_code=[0, 1])
+                                    if diff.strip():
+                                        has_changes = True
+                                        break
+                                    else:
+                                        # File is unchanged, might already be committed
+                                        logger.debug(f"File {file_path} is unchanged from HEAD")
+                                else:
+                                    # File is not tracked, needs to be added
+                                    has_changes = True
+                                    break
+                            except Exception as e:
+                                logger.debug(f"Error checking file {file_path}: {e}")
+                                has_changes = True  # If we can't check, assume changes exist
+                                break
+                    
+                    if not has_changes:
+                        logger.info("No changes to commit (all files are already committed)")
+                        return True
+            except Exception as e:
+                logger.debug(f"Error checking repo status: {e}")
+                # Continue with commit attempt - better to try than to fail silently
+            
+            # Ensure git user is configured before committing
+            try:
+                repo.git.config('user.name', scope='local')
+            except git.exc.GitCommandError:
+                default_name = author_name or "Agentic Code Generator"
+                repo.git.config('user.name', default_name, scope='local')
+                logger.info(f"Configured git user.name: {default_name}")
+            
+            try:
+                repo.git.config('user.email', scope='local')
+            except git.exc.GitCommandError:
+                default_email = author_email or "agentic@scrum-automation.local"
+                repo.git.config('user.email', default_email, scope='local')
+                logger.info(f"Configured git user.email: {default_email}")
             
             # Commit changes
             try:
@@ -470,6 +538,7 @@ class LocalGitService:
                     return True
                 else:
                     logger.error(f"Failed to commit changes: {error_msg}")
+                    logger.error(f"Repository state: is_dirty={repo.is_dirty()}, files_added={files_added}")
                     return False
             
         except git.exc.GitCommandError as e:

@@ -25,23 +25,51 @@ class LLMService:
     def _initialize_bedrock(self):
         """Initialize AWS Bedrock client."""
         try:
-            # Check for bearer token first (alternative authentication)
-            if self.settings.aws_bearer_token_bedrock:
-                logger.info("Using Bedrock bearer token authentication")
-                self.bedrock_bearer_token = self.settings.aws_bearer_token_bedrock
-                self.bedrock_client = None  # Will use direct HTTP calls with bearer token
-                logger.info("Bedrock bearer token configured")
-            elif self.settings.aws_access_key_id and self.settings.aws_secret_access_key:
+            # Prefer AWS credentials over bearer token (more reliable)
+            # Bearer token must start with specific prefixes to be valid
+            bearer_token = self.settings.aws_bearer_token_bedrock or ""
+            is_valid_bearer_token = (
+                bearer_token and 
+                bearer_token.strip() and 
+                (bearer_token.startswith("bedrock-api-key-") or 
+                 bearer_token.startswith("sk-") or
+                 len(bearer_token) > 100)  # Generic check for AWS-style tokens
+            )
+            
+            if self.settings.aws_access_key_id and self.settings.aws_secret_access_key:
+                # Prefer AWS credentials (access key/secret)
+        try:
             self.bedrock_client = boto3.client(
                 'bedrock-runtime',
                 aws_access_key_id=self.settings.aws_access_key_id,
                 aws_secret_access_key=self.settings.aws_secret_access_key,
                 region_name=self.settings.aws_region
             )
-                self.bedrock_bearer_token = None
-                logger.info("Bedrock client initialized with AWS credentials")
+                    self.bedrock_bearer_token = None
+                    logger.info("Bedrock client initialized with AWS credentials")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize Bedrock with AWS credentials: {e}")
+                    # Fall back to bearer token if AWS credentials fail
+                    if is_valid_bearer_token:
+                        logger.info("Falling back to Bedrock bearer token authentication")
+                        self.bedrock_bearer_token = bearer_token.strip()
+                        self.bedrock_client = None
+                        logger.info("Bedrock bearer token configured")
+                    else:
+                        logger.warning("No valid Bedrock authentication method available")
+                        self.bedrock_client = None
+                        self.bedrock_bearer_token = None
+            elif is_valid_bearer_token:
+                # Use bearer token if AWS credentials not available
+                logger.info("Using Bedrock bearer token authentication")
+                self.bedrock_bearer_token = bearer_token.strip()
+                self.bedrock_client = None  # Will use direct HTTP calls with bearer token
+                logger.info("Bedrock bearer token configured")
             else:
-                logger.warning("Bedrock credentials not configured (neither bearer token nor access key/secret)")
+                logger.warning("Bedrock credentials not configured (no valid bearer token or access key/secret)")
+                if bearer_token:
+                    logger.warning(f"Bearer token found but format may be invalid (starts with: {bearer_token[:10]}...)")
+                    logger.warning("Expected format: 'bedrock-api-key-...' or AWS access key/secret")
                 self.bedrock_client = None
                 self.bedrock_bearer_token = None
         except Exception as e:
@@ -152,23 +180,44 @@ class LLMService:
     ) -> Optional[Dict[str, Any]]:
         """Generate code using AWS Bedrock."""
         if not self.bedrock_client and not self.bedrock_bearer_token:
+            logger.error("Bedrock client not initialized (no credentials or bearer token)")
             raise Exception("Bedrock client not initialized (no credentials or bearer token)")
+        
+        logger.info(f"Using Bedrock for code generation (client: {self.bedrock_client is not None}, bearer: {self.bedrock_bearer_token is not None})")
         
         prompt = self._build_code_generation_prompt(
             description, context, existing_code, acceptance_criteria
         )
         
         try:
+            logger.info("Invoking Bedrock API...")
             response_text = await asyncio.wait_for(
                 self._invoke_bedrock(prompt),
                 timeout=self.settings.llm_timeout_seconds
             )
-            return self._parse_code_generation_response(response_text, context)
+            
+            if not response_text or not response_text.strip():
+                logger.error("Bedrock returned empty response")
+                return None
+            
+            logger.info(f"Bedrock returned response (length: {len(response_text)})")
+            logger.debug(f"Bedrock response (first 1000 chars): {response_text[:1000]}")
+            
+            parsed_result = self._parse_code_generation_response(response_text, context)
+            
+            if parsed_result is None:
+                logger.warning("Failed to parse Bedrock response as valid code structure")
+                logger.warning(f"Response (first 2000 chars): {response_text[:2000]}")
+            else:
+                logger.info(f"Successfully parsed Bedrock response: {len(parsed_result.get('code', []))} code files")
+            
+            return parsed_result
+            
         except asyncio.TimeoutError:
             logger.error("Bedrock request timed out")
             raise
         except Exception as e:
-            logger.error(f"Bedrock code generation failed: {e}")
+            logger.error(f"Bedrock code generation failed: {e}", exc_info=True)
             raise
     
     async def _generate_code_with_cursor(
@@ -315,32 +364,44 @@ Ensure the code is production-ready, follows best practices, and includes proper
     ) -> Optional[Dict[str, Any]]:
         """Parse LLM response into code generation structure."""
         try:
-            logger.debug(f"Parsing LLM response (length: {len(response_text)})")
+            logger.info(f"Parsing LLM response (length: {len(response_text)})")
             logger.debug(f"Response preview: {response_text[:500]}")
             
             # Try to extract JSON from response
             json_data = self._extract_json_block(response_text)
             if json_data:
-                logger.debug(f"Successfully extracted JSON block")
+                logger.info(f"Successfully extracted JSON block")
                 # Validate structure
                 if self._validate_code_structure(json_data):
+                    logger.info(f"Extracted JSON structure is valid with {len(json_data.get('code', []))} code files")
                     return json_data
                 else:
                     logger.warning(f"Extracted JSON has invalid structure: {list(json_data.keys())}")
+                # If block exists but structure invalid, inspect nested content
+                nested = self._extract_code_structure_from_value(json_data)
+                if nested:
+                    logger.info("Extracted valid structure from nested JSON block")
+                    return nested
             
             # Try to parse entire response as JSON
             try:
                 json_data = json.loads(response_text)
-                if self._validate_code_structure(json_data):
-                    return json_data
+                logger.debug(f"Successfully parsed entire response as JSON")
+                normalized = self._extract_code_structure_from_value(json_data)
+                if normalized:
+                    logger.info("Extracted valid structure from JSON payload")
+                    return normalized
                 else:
                     logger.warning(f"Parsed JSON has invalid structure: {list(json_data.keys())}")
             except json.JSONDecodeError as e:
                 logger.debug(f"Response is not valid JSON: {e}")
             
             # If JSON extraction fails, use deterministic fallback
-            logger.warning("Failed to parse LLM response as JSON, using fallback")
-            logger.debug(f"Full response: {response_text[:2000]}")
+            logger.warning("Failed to parse LLM response as JSON")
+            logger.warning(f"LLM raw response length: {len(response_text)}")
+            logger.warning(f"LLM raw response (first 2000 chars): {response_text[:2000]}")
+            if len(response_text) > 2000:
+                logger.warning(f"LLM raw response (last 500 chars): ...{response_text[-500:]}")
             return None
             
         except Exception as e:
@@ -350,35 +411,35 @@ Ensure the code is production-ready, follows best practices, and includes proper
     def _validate_code_structure(self, data: Dict[str, Any]) -> bool:
         """Validate that parsed data has the required code structure."""
         if not isinstance(data, dict):
-            logger.debug("Data is not a dict")
+            logger.warning("Data is not a dict")
             return False
         
         # Check for required "code" field
         if "code" not in data:
-            logger.debug(f"Missing 'code' field. Available keys: {list(data.keys())}")
+            logger.warning(f"Missing 'code' field. Available keys: {list(data.keys())}")
             return False
         
         if not isinstance(data["code"], list):
-            logger.debug(f"'code' is not a list, it's: {type(data['code'])}")
+            logger.warning(f"'code' is not a list, it's: {type(data['code'])}")
             return False
         
         if len(data["code"]) == 0:
-            logger.debug("'code' list is empty")
+            logger.warning("'code' list is empty")
             return False
         
         # Check that each code file has path and content
         for i, code_file in enumerate(data["code"]):
             if not isinstance(code_file, dict):
-                logger.debug(f"Code file {i} is not a dict: {type(code_file)}")
+                logger.warning(f"Code file {i} is not a dict: {type(code_file)}")
                 return False
             if "path" not in code_file:
-                logger.debug(f"Code file {i} missing 'path' field. Keys: {list(code_file.keys())}")
+                logger.warning(f"Code file {i} missing 'path' field. Keys: {list(code_file.keys())}")
                 return False
             if "content" not in code_file:
-                logger.debug(f"Code file {i} missing 'content' field. Keys: {list(code_file.keys())}")
+                logger.warning(f"Code file {i} missing 'content' field. Keys: {list(code_file.keys())}")
                 return False
         
-        logger.debug(f"Code structure is valid with {len(data['code'])} files")
+        logger.info(f"Code structure is valid with {len(data['code'])} files")
         return True
     
     async def generate_meeting_summary(
@@ -648,6 +709,32 @@ def test_get_item():
     def _extract_json_block(self, text: str) -> Optional[Dict[str, Any]]:
         """Extract a JSON object from common LLM output patterns (e.g., fenced code)."""
         try:
+            # First, try to find JSON object directly in the text
+            # Look for opening brace followed by closing brace
+            first_brace = text.find('{')
+            if first_brace != -1:
+                # Find the matching closing brace
+                brace_count = 0
+                last_brace = -1
+                for i in range(first_brace, len(text)):
+                    if text[i] == '{':
+                        brace_count += 1
+                    elif text[i] == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            last_brace = i
+                            break
+                
+                if last_brace != -1 and last_brace > first_brace:
+                    candidate = text[first_brace:last_brace+1]
+                    try:
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed, dict):
+                            logger.debug("Successfully extracted JSON from text (direct brace matching)")
+                            return parsed
+                    except json.JSONDecodeError:
+                        pass  # Try other methods
+            
             # Look for fenced blocks ```json ... ``` or ``` ... ```
             fences = [
                 ("```json", "```"),
@@ -661,151 +748,163 @@ def test_get_item():
                     if s2 != -1:
                         candidate = text[s+len(start):s2].strip()
                         try:
-                            return json.loads(candidate)
-                        except Exception:
+                            parsed = json.loads(candidate)
+                            if isinstance(parsed, dict):
+                                logger.debug(f"Successfully extracted JSON from {start} block")
+                                return parsed
+                        except json.JSONDecodeError:
                             # Sometimes there is leading text before the JSON
                             first = candidate.find('{')
                             last = candidate.rfind('}')
                             if first != -1 and last != -1 and last > first:
-                                return json.loads(candidate[first:last+1])
+                                try:
+                                    parsed = json.loads(candidate[first:last+1])
+                                    if isinstance(parsed, dict):
+                                        logger.debug(f"Successfully extracted JSON from {start} block (with trimming)")
+                                        return parsed
+                                except json.JSONDecodeError:
+                                    pass
+            
             return None
+        except Exception as e:
+            logger.debug(f"Error extracting JSON block: {e}")
+            return None
+
+    def _extract_code_structure_from_value(self, value: Any) -> Optional[Dict[str, Any]]:
+        """Attempt to locate a valid generated-code JSON structure within a value."""
+        try:
+            if isinstance(value, dict):
+                # Direct validation
+                if self._validate_code_structure(value):
+                    return value
+                # Inspect nested values
+                for nested in value.values():
+                    extracted = self._extract_code_structure_from_value(nested)
+                    if extracted:
+                        return extracted
+
+            elif isinstance(value, list):
+                for item in value:
+                    extracted = self._extract_code_structure_from_value(item)
+                    if extracted:
+                        return extracted
+
+            elif isinstance(value, str):
+                # Strip leading/trailing whitespace
+                text = value.strip()
+                if not text:
+                    return None
+
+                # Try extracting JSON blocks (handles ```json fences etc.)
+                block = self._extract_json_block(text)
+                if block:
+                    extracted = self._extract_code_structure_from_value(block)
+                    if extracted:
+                        return extracted
+
+                # Try parsing as JSON directly
+                try:
+                    parsed = json.loads(text)
         except Exception:
+                    parsed = None
+                if parsed is not None:
+                    return self._extract_code_structure_from_value(parsed)
+        except Exception as e:
+            logger.debug(f"Failed to extract code structure from value: {e}")
             return None
 
     def _deterministic_codegen(self, description: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """Produce a deterministic, runnable bundle when the model output is unusable.
-
-        Currently supports the 'notes' FastAPI + MongoDB API described in the task.
         """
         # Basic inference for paths
         language = (context.get("language") or "python").lower()
         framework = (context.get("framework") or "fastapi").lower()
-        if language != "python" or framework != "fastapi":
-            # Generic minimal fallback to avoid lying
-            return {
-                "language": language or "python",
-                "files": [{"path": "app/example.py", "purpose": "Generated scaffold"}],
-                "code": [{"path": "app/example.py", "content": f"# Generated from description\n\nDESCRIPTION = {json.dumps(description)}\n"}],
-                "tests": [],
-                "notes": ["Deterministic fallback scaffold (non-fastapi path)"]
-            }
+        # Generic minimal fallback to avoid returning misleading implementation details.
+        # The goal is to produce a safe scaffold that surfaces that the AI output failed,
+        # while still giving engineers a place to start.
+        description_snippet = (description or "").strip()
+        if len(description_snippet) > 300:
+            description_snippet = description_snippet[:297] + "..."
 
-        db_py = (
-            "from motor.motor_asyncio import AsyncIOMotorClient\n"
-            "import os\n\n"
-            "MONGO_URI = os.getenv(\"MONGO_URI\", \"mongodb://localhost:27017\")\n"
-            "DB_NAME = os.getenv(\"MONGO_DB\", \"notes_db\")\n\n"
-            "_client: AsyncIOMotorClient | None = None\n\n"
-            "def get_client() -> AsyncIOMotorClient:\n"
-            "    global _client\n"
-            "    if _client is None:\n"
-            "        _client = AsyncIOMotorClient(MONGO_URI)\n"
-            "    return _client\n\n"
-            "def get_db():\n"
-            "    return get_client()[DB_NAME]\n\n"
-            "def get_notes_collection():\n"
-            "    return get_db()[\"notes\"]\n"
-        )
-
-        schemas_py = (
-            "from pydantic import BaseModel, Field, validator\n"
-            "from typing import Optional\n"
-            "from datetime import datetime\n\n"
-            "class NoteCreate(BaseModel):\n"
-            "    title: str = Field(..., min_length=1, max_length=120)\n"
-            "    body: str = Field(..., min_length=1, max_length=5000)\n\n"
-            "    @validator('title')\n"
-            "    def _t(cls, v: str): return v.strip()\n\n"
-            "    @validator('body')\n"
-            "    def _b(cls, v: str): return v.strip()\n\n"
-            "class NoteResponse(BaseModel):\n"
-            "    id: str\n"
-            "    title: str\n"
-            "    body: str\n"
-            "    created_at: datetime\n"
-            "    updated_at: datetime\n"
-        )
-
+        if language == "python" and framework == "fastapi":
         main_py = (
-            "from fastapi import FastAPI, HTTPException, status, Path\n"
-            "from fastapi.responses import JSONResponse\n"
-            "from fastapi.middleware.cors import CORSMiddleware\n"
-            "from pymongo import ASCENDING, DESCENDING\n"
-            "from pymongo.errors import DuplicateKeyError, PyMongoError\n"
-            "from datetime import datetime, timezone\n"
-            "from bson import ObjectId\n"
-            "from app.db import get_notes_collection\n"
-            "from app.schemas import NoteCreate, NoteResponse\n\n"
-            "app = FastAPI(title='Notes API (FastAPI + MongoDB)')\n\n"
-            "app.add_middleware(CORSMiddleware, allow_origins=['*'], allow_methods=['*'], allow_headers=['*'])\n\n"
-            "@app.on_event('startup')\n"
-            "async def startup_indexes():\n"
-            "    coll = get_notes_collection()\n"
-            "    await coll.create_index([('title', ASCENDING), ('created_day', ASCENDING)], unique=True, name='title_createdday_unique')\n"
-            "    await coll.create_index([('created_at', DESCENDING)], name='created_at_desc')\n\n"
-            "def utc_now():\n"
-            "    return datetime.now(timezone.utc)\n\n"
-            "@app.post('/api/v1/notes', status_code=status.HTTP_201_CREATED)\n"
-            "async def create_note(payload: NoteCreate):\n"
-            "    coll = get_notes_collection()\n"
-            "    now = utc_now()\n"
-            "    doc = { 'title': payload.title, 'body': payload.body, 'created_at': now, 'updated_at': now, 'created_day': now.date().isoformat() }\n"
-            "    try:\n"
-            "        res = await coll.insert_one(doc)\n"
-            "    except DuplicateKeyError:\n"
-            "        raise HTTPException(status_code=400, detail='Note with same title already exists for today')\n"
-            "    except PyMongoError:\n"
-            "        raise HTTPException(status_code=500, detail='database error')\n"
-            "    return JSONResponse(status_code=status.HTTP_201_CREATED, content={'id': str(res.inserted_id)})\n\n"
-            "@app.get('/api/v1/notes/{id}', response_model=NoteResponse)\n"
-            "async def get_note(id: str = Path(..., description='Mongo ObjectId')):\n"
-            "    if not ObjectId.is_valid(id):\n"
-            "        raise HTTPException(status_code=400, detail='Invalid id')\n"
-            "    coll = get_notes_collection()\n"
-            "    doc = await coll.find_one({'_id': ObjectId(id)})\n"
-            "    if not doc:\n"
-            "        raise HTTPException(status_code=404, detail='Note not found')\n"
-            "    return NoteResponse(id=str(doc['_id']), title=doc['title'], body=doc['body'], created_at=doc['created_at'], updated_at=doc['updated_at'])\n"
+                "from fastapi import FastAPI, HTTPException\n"
+                "from pydantic import BaseModel\n"
+                "from datetime import datetime\n"
+                "from typing import Dict\n"
+                "\n"
+                "app = FastAPI(title='Generated API Placeholder')\n"
+                "\n"
+                "class HealthResponse(BaseModel):\n"
+                "    status: str\n"
+                "    generated_at: datetime\n"
+                "\n"
+                "@app.get('/api/v1/health', response_model=HealthResponse)\n"
+                "async def health_check() -> HealthResponse:\n"
+                "    \"\"\"Simple health endpoint generated by deterministic fallback.\"\"\"\n"
+                "    return HealthResponse(status='fallback', generated_at=datetime.utcnow())\n"
+                "\n"
+                "@app.get('/api/v1/description')\n"
+                "async def describe_ticket() -> Dict[str, str]:\n"
+                "    \"\"\"Expose the ticket description that triggered the fallback.\"\"\"\n"
+                "    return {\n"
+                "        'message': 'Fallback scaffold generated. Please replace with real implementation.',\n"
+                "        'ticket_description': "
+                + json.dumps(description_snippet)
+                + "\n"
+                "    }\n"
         )
 
         tests_py = (
             "import pytest\n"
             "from httpx import AsyncClient\n"
-            "from app.main import app\n\n"
+                "from app.main import app\n"
+                "\n"
             "@pytest.mark.asyncio\n"
-            "async def test_create_and_get_note():\n"
+                "async def test_health_endpoint():\n"
             "    async with AsyncClient(app=app, base_url='http://test') as ac:\n"
-            "        payload = {'title': 'Test Note', 'body': 'This is a test'}\n"
-            "        post_resp = await ac.post('/api/v1/notes', json=payload)\n"
-            "        assert post_resp.status_code == 201\n"
-            "        data = post_resp.json()\n"
-            "        note_id = data['id']\n"
-            "        get_resp = await ac.get(f'/api/v1/notes/{note_id}')\n"
-            "        assert get_resp.status_code == 200\n"
-            "        note = get_resp.json()\n"
-            "        assert note['title'] == payload['title']\n"
-            "        assert note['body'] == payload['body']\n"
+                "        response = await ac.get('/api/v1/health')\n"
+                "        assert response.status_code == 200\n"
+                "        data = response.json()\n"
+                "        assert data['status'] == 'fallback'\n"
+                "        assert 'generated_at' in data\n"
+                "\n"
+                "@pytest.mark.asyncio\n"
+                "async def test_description_endpoint():\n"
+                "    async with AsyncClient(app=app, base_url='http://test') as ac:\n"
+                "        response = await ac.get('/api/v1/description')\n"
+                "        assert response.status_code == 200\n"
+                "        data = response.json()\n"
+                "        assert 'ticket_description' in data\n"
         )
 
         return {
             "language": "python",
             "files": [
-                {"path": "app/db.py", "purpose": "Mongo client and helpers"},
-                {"path": "app/schemas.py", "purpose": "Pydantic models"},
-                {"path": "app/main_notes.py", "purpose": "FastAPI endpoints for notes"},
-                {"path": "tests/test_notes.py", "purpose": "Unit tests"},
+                    {"path": "app/main.py", "purpose": "Fallback FastAPI application"},
+                    {"path": "tests/test_fallback.py", "purpose": "Tests for fallback endpoints"},
             ],
             "code": [
-                {"path": "app/db.py", "content": db_py},
-                {"path": "app/schemas.py", "content": schemas_py},
-                {"path": "app/main_notes.py", "content": main_py},
-                {"path": "tests/test_notes.py", "content": tests_py},
+                    {"path": "app/main.py", "content": main_py},
+                    {"path": "tests/test_fallback.py", "content": tests_py},
             ],
-            "tests": [{"path": "tests/test_notes.py", "content": tests_py}],
+                "tests": [{"path": "tests/test_fallback.py", "content": tests_py}],
             "notes": [
-                "Deterministic fallback used due to non-JSON LLM output.",
-                "Endpoints: POST /api/v1/notes, GET /api/v1/notes/{id}.",
-                "Requires MongoDB running at MONGO_URI (default mongodb://localhost:27017)."
+                    "Deterministic fallback used due to LLM output parsing failure.",
+                    "Inspect the /api/v1/description endpoint for original ticket context.",
+                    "Replace this scaffold with a real implementation.",
+                ],
+            }
+
+        # Generic fallback for other languages/frameworks
+        return {
+            "language": language or "python",
+            "files": [{"path": "app/generated_placeholder.txt", "purpose": "Placeholder generated due to fallback"}],
+            "code": [{"path": "app/generated_placeholder.txt", "content": f"Deterministic fallback placeholder. Description:\n{description_snippet}"}],
+            "tests": [],
+            "notes": [
+                "Deterministic fallback used due to LLM output parsing failure.",
+                "No implementation generated. Please rerun agentic workflow.",
             ],
         }
     
@@ -877,10 +976,11 @@ def test_get_item():
     async def _invoke_bedrock_with_bearer_token(self, body: Dict[str, Any]) -> str:
         """Invoke Bedrock using bearer token authentication."""
         region = self.settings.aws_region
-        # Convert model ID format: anthropic.claude-3-sonnet-20240229-v1:0 -> anthropic.claude-3-sonnet-20240229-v1:0
         model_id = self.settings.bedrock_model_id
-        # Bedrock API endpoint format
-        url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{model_id.replace(':', '/')}/invoke"
+        # Ensure the model id is URL-encoded (colons are not valid raw path chars)
+        from urllib.parse import quote
+        encoded_model_id = quote(model_id, safe="")
+        url = f"https://bedrock-runtime.{region}.amazonaws.com/model/{encoded_model_id}/invoke"
         
         headers = {
             "Content-Type": "application/json",
